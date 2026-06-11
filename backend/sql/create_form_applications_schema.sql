@@ -89,6 +89,17 @@ CREATE TABLE IF NOT EXISTS form_application_signatories (
   )
 );
 
+CREATE TABLE IF NOT EXISTS form_application_question_comments (
+  application_question_comment_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  application_id uuid NOT NULL REFERENCES form_applications(application_id) ON DELETE CASCADE,
+  application_signatory_id uuid REFERENCES form_application_signatories(application_signatory_id) ON DELETE CASCADE,
+  commenter_user_id uuid REFERENCES users(user_id) ON DELETE SET NULL,
+  question_id uuid REFERENCES form_questions(question_id) ON DELETE SET NULL,
+  comment_text text NOT NULL,
+  created_at timestamp without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at timestamp without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_form_applications_form_id
   ON form_applications (form_id);
 
@@ -119,3 +130,28 @@ CREATE INDEX IF NOT EXISTS idx_form_application_signatories_application_id
 
 CREATE INDEX IF NOT EXISTS idx_form_application_signatories_signer_user_id
   ON form_application_signatories (signer_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_form_application_question_comments_application_id
+  ON form_application_question_comments (application_id);
+
+CREATE INDEX IF NOT EXISTS idx_form_application_question_comments_signatory_id
+  ON form_application_question_comments (application_signatory_id);
+
+CREATE INDEX IF NOT EXISTS idx_form_application_question_comments_question_id
+  ON form_application_question_comments (question_id);
+
+ALTER TABLE IF EXISTS form_applications
+  DROP CONSTRAINT IF EXISTS chk_form_applications_status;
+
+ALTER TABLE IF EXISTS form_applications
+  ADD CONSTRAINT chk_form_applications_status CHECK (
+    application_status IN (
+      'draft',
+      'submitted',
+      'under_review',
+      'approved',
+      'rejected',
+      'cancelled',
+      'withdrawn'
+    )
+  );

@@ -1,34 +1,41 @@
+const fs = require("fs/promises");
+const path = require("path");
+
 const {
   connectDatabase,
+  getPool,
   isDatabaseConfigured,
   query
 } = require("../config/database");
 
-const ensureApplicationSchemaCompatibility = async () => {
-  await query(`
-    ALTER TABLE IF EXISTS form_applications
-    ADD COLUMN IF NOT EXISTS google_drive_link text
-  `);
+const schemaFileNames = [
+  "create_forms_schema.sql",
+  "create_form_applications_schema.sql",
+  "drop_timestamp_defaults.sql"
+];
 
-  await query(`
-    ALTER TABLE IF EXISTS form_applications
-    DROP CONSTRAINT IF EXISTS chk_form_applications_status
-  `);
+const readSchemaFile = async (fileName) => {
+  const filePath = path.resolve(__dirname, "../../sql", fileName);
 
-  await query(`
-    ALTER TABLE IF EXISTS form_applications
-    ADD CONSTRAINT chk_form_applications_status CHECK (
-      application_status IN (
-        'draft',
-        'submitted',
-        'under_review',
-        'approved',
-        'rejected',
-        'cancelled',
-        'withdrawn'
-      )
-    )
-  `);
+  return fs.readFile(filePath, "utf8");
+};
+
+const runSchemaMigrations = async () => {
+  const client = await getPool().connect();
+
+  try {
+    for (const fileName of schemaFileNames) {
+      const sql = await readSchemaFile(fileName);
+
+      if (!sql.trim()) {
+        continue;
+      }
+
+      await client.query(sql);
+    }
+  } finally {
+    client.release();
+  }
 };
 
 const initializeDatabase = async () => {
@@ -40,7 +47,7 @@ const initializeDatabase = async () => {
   }
 
   await connectDatabase();
-  await ensureApplicationSchemaCompatibility();
+  await runSchemaMigrations();
 
   return {
     configured: true,
@@ -68,5 +75,6 @@ const getDatabaseHealth = async () => {
 
 module.exports = {
   getDatabaseHealth,
-  initializeDatabase
+  initializeDatabase,
+  runSchemaMigrations
 };

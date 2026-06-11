@@ -1,10 +1,10 @@
-ALTER TABLE users
+ALTER TABLE IF EXISTS users
 ALTER COLUMN created_at DROP DEFAULT,
 ALTER COLUMN updated_at DROP DEFAULT;
 
-ALTER TABLE programs
+ALTER TABLE IF EXISTS programs
 ALTER COLUMN created_at DROP DEFAULT,
 ALTER COLUMN updated_at DROP DEFAULT;
 
-ALTER TABLE email_verification_otps
+ALTER TABLE IF EXISTS email_verification_otps
 ALTER COLUMN created_at DROP DEFAULT;

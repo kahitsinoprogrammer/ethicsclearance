@@ -4,6 +4,7 @@
   "description": "Express backend structured with MVC-style folders.",
   "main": "server.js",
   "scripts": {
+    "migrate": "node scripts/migrate.js",
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
