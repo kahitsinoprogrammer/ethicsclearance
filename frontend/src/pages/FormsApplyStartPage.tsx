@@ -148,15 +148,15 @@ export default function FormsApplyStartPage() {
         <SectionHeader
           eyebrow="Forms"
           title="Start Application"
-          description="Choose an active form from the list below to start an application. The applicant assigns the signatories here, then GSRO completes the form answers afterward."
+          description="Choose an active form from the list below to start an application. Applicants only provide the research title and thesis link here, then GSRO assigns signatories and completes the review."
         />
 
         <Card className="mt-8">
           <CardHeader>
             <CardTitle>Available forms</CardTitle>
             <CardDescription>
-              Search active forms, then open one to begin answering the
-              questions and assigning reviewer signatories.
+              Search active forms, then open one to provide the application
+              details for GSRO review.
             </CardDescription>
           </CardHeader>
           <CardContent>

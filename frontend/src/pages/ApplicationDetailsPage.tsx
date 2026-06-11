@@ -30,9 +30,12 @@ import { useToast } from "@/contexts/ToastContext";
 import {
   approveApplicationSignatory,
   fetchApplicationDetails,
+  rejectApplicationSignatory,
   updateApplicationSignatories,
   updateApplicationAnswers,
+  withdrawApplication,
   type ApplicationSignatoryRecord,
+  type ApplicationQuestionCommentRecord,
   type FormApplicationDetails,
   type FormApplicationQuestionSnapshot,
   type ReviewerUserRecord
@@ -47,8 +50,11 @@ type QuestionDraft = {
   optionIds: string[];
 };
 
+type SignatoryQuestionCommentDrafts = Record<string, Record<string, string>>;
+type SignatoryQuestionCommentErrors = Record<string, Record<string, string>>;
 type ValidationErrors = Record<string, string>;
 type SignatoryValidationErrors = Record<string, string>;
+type SignatoryDecisionType = "approve" | "reject";
 
 const questionTypeLabels: Record<string, string> = {
   CHECKBOX: "Checkbox",
@@ -71,6 +77,10 @@ const getStatusLabel = (status: string) => {
 
   if (status === "submitted") {
     return "Waiting for GSRO";
+  }
+
+  if (status === "withdrawn") {
+    return "Withdrawn";
   }
 
   return status.replace(/_/g, " ");
@@ -124,6 +134,25 @@ const buildDrafts = (details: FormApplicationDetails) => {
   return drafts;
 };
 
+const buildSignatoryQuestionCommentDrafts = (details: FormApplicationDetails) => {
+  const drafts: SignatoryQuestionCommentDrafts = {};
+
+  details.form.sections.forEach((section) => {
+    section.questions.forEach((question) => {
+      question.question_comments.forEach((questionComment) => {
+        if (!drafts[questionComment.application_signatory_id]) {
+          drafts[questionComment.application_signatory_id] = {};
+        }
+
+        drafts[questionComment.application_signatory_id][question.question_id] =
+          questionComment.comment_text;
+      });
+    });
+  });
+
+  return drafts;
+};
+
 const buildSignatorySelections = (details: FormApplicationDetails) => {
   const selections: Record<string, string> = {};
 
@@ -137,6 +166,60 @@ const buildSignatorySelections = (details: FormApplicationDetails) => {
   });
 
   return selections;
+};
+
+const getSignatoryStatusLabel = (
+  signatoryStatus: string | null | undefined,
+  signerUserId: string | null | undefined
+) => {
+  if (signatoryStatus === "signed") {
+    return "Approved";
+  }
+
+  if (signatoryStatus === "rejected") {
+    return "Revision Requested";
+  }
+
+  if (signatoryStatus === "pending" && !signerUserId) {
+    return "Unassigned";
+  }
+
+  if (signatoryStatus === "pending") {
+    return "Pending";
+  }
+
+  if (signatoryStatus === "skipped") {
+    return "Skipped";
+  }
+
+  return "Pending";
+};
+
+const getQuestionCommentAuthorLabel = (
+  questionComment: ApplicationQuestionCommentRecord
+) => {
+  const signerName = questionComment.commenter_name || questionComment.commenter_email;
+
+  if (questionComment.position_name_snapshot && signerName) {
+    return `${questionComment.position_name_snapshot} | ${signerName}`;
+  }
+
+  return (
+    questionComment.position_name_snapshot ||
+    signerName ||
+    "Recorded signatory comment"
+  );
+};
+
+const getInvalidSignatoryDecisionMessage = (
+  decision: SignatoryDecisionType,
+  questionCommentCount: number
+) => {
+  if (decision === "reject" && questionCommentCount === 0) {
+    return "Add at least one question comment before requesting revision for this application.";
+  }
+
+  return "";
 };
 
 const validateSignatorySelections = (
@@ -231,6 +314,10 @@ export default function ApplicationDetailsPage() {
   const [signatorySelections, setSignatorySelections] = useState<
     Record<string, string>
   >({});
+  const [signatoryQuestionCommentDrafts, setSignatoryQuestionCommentDrafts] =
+    useState<SignatoryQuestionCommentDrafts>({});
+  const [signatoryQuestionCommentErrors, setSignatoryQuestionCommentErrors] =
+    useState<SignatoryQuestionCommentErrors>({});
   const [signatoryErrors, setSignatoryErrors] = useState<SignatoryValidationErrors>(
     {}
   );
@@ -238,8 +325,13 @@ export default function ApplicationDetailsPage() {
   const [submitError, setSubmitError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSavingAnswers, setIsSavingAnswers] = useState(false);
-  const [signingSignatoryId, setSigningSignatoryId] = useState("");
-  const [isSavingSignatories, setIsSavingSignatories] = useState(false);
+  const [isWithdrawing, setIsWithdrawing] = useState(false);
+  const [activeSignatoryId, setActiveSignatoryId] = useState("");
+  const [savingDecision, setSavingDecision] = useState<{
+    applicationSignatoryId: string;
+    decision: SignatoryDecisionType;
+  } | null>(null);
+  const [isRevisionMode, setIsRevisionMode] = useState(false);
   const isApplicantRoute = location.pathname.startsWith("/applications/my/");
   const isSignatureRoute = location.pathname.startsWith(
     "/applications/for-signature/"
@@ -255,12 +347,24 @@ export default function ApplicationDetailsPage() {
     try {
       setIsLoading(true);
       const result = await fetchApplicationDetails(token, applicationId);
+      const nextAssignedPendingSignatory =
+        result.signatories.find(
+          (signatory) =>
+            signatory.signer_user_id === user?.user_id &&
+            signatory.signatory_status === "pending"
+        ) || null;
 
       setDetails(result);
       setDrafts(buildDrafts(result));
       setQuestionErrors({});
       setSignatorySelections(buildSignatorySelections(result));
+      setSignatoryQuestionCommentDrafts(buildSignatoryQuestionCommentDrafts(result));
+      setSignatoryQuestionCommentErrors({});
       setSignatoryErrors({});
+      setActiveSignatoryId(
+        nextAssignedPendingSignatory?.application_signatory_id || ""
+      );
+      setIsRevisionMode(false);
       setPageError("");
       setSubmitError("");
     } catch (error) {
@@ -276,9 +380,9 @@ export default function ApplicationDetailsPage() {
 
   useEffect(() => {
     loadDetails();
-  }, [applicationId, token]);
+  }, [applicationId, token, user?.user_id]);
 
-  const assignedPendingSignatories = useMemo(() => {
+  const assignedActionableSignatories = useMemo(() => {
     if (!details || !user) {
       return [];
     }
@@ -286,30 +390,73 @@ export default function ApplicationDetailsPage() {
     return details.signatories.filter(
       (signatory) =>
         signatory.signer_user_id === user.user_id &&
-        signatory.signatory_status === "pending"
+        ((details.application_status === "under_review" &&
+          signatory.signatory_status === "pending") ||
+          (["submitted", "under_review"].includes(details.application_status) &&
+            signatory.signatory_status === "rejected"))
     );
   }, [details, user]);
 
-  const assignedPendingSignatoryIds = useMemo(
+  const assignedActionableSignatoryIds = useMemo(
     () =>
       new Set(
-        assignedPendingSignatories.map(
+        assignedActionableSignatories.map(
           (signatory) => signatory.application_signatory_id
         )
       ),
-    [assignedPendingSignatories]
+    [assignedActionableSignatories]
   );
+  const activePendingSignatory = useMemo(() => {
+    if (!assignedActionableSignatories.length) {
+      return null;
+    }
+
+    return (
+      assignedActionableSignatories.find(
+        (signatory) =>
+          signatory.application_signatory_id === activeSignatoryId
+      ) || assignedActionableSignatories[0]
+    );
+  }, [activeSignatoryId, assignedActionableSignatories]);
 
   const canApproveAsSignatory = Boolean(
     isSignatureRoute &&
       details?.current_user_permissions.can_approve &&
-      assignedPendingSignatories.length
+      assignedActionableSignatories.length
   );
+  const isReopenedRejectedSignatory =
+    activePendingSignatory?.signatory_status === "rejected";
+
+  useEffect(() => {
+    setIsRevisionMode(false);
+  }, [activePendingSignatory?.application_signatory_id]);
+
+  useEffect(() => {
+    if (!assignedActionableSignatories.length) {
+      if (activeSignatoryId) {
+        setActiveSignatoryId("");
+      }
+      return;
+    }
+
+    if (
+      !activeSignatoryId ||
+      !assignedActionableSignatoryIds.has(activeSignatoryId)
+    ) {
+      setActiveSignatoryId(
+        assignedActionableSignatories[0].application_signatory_id
+      );
+    }
+  }, [
+    activeSignatoryId,
+    assignedActionableSignatories,
+    assignedActionableSignatoryIds
+  ]);
 
   const isActionablePendingSignatory = (signatory: ApplicationSignatoryRecord) => {
     return (
       canApproveAsSignatory &&
-      assignedPendingSignatoryIds.has(signatory.application_signatory_id)
+      assignedActionableSignatoryIds.has(signatory.application_signatory_id)
     );
   };
 
@@ -318,11 +465,24 @@ export default function ApplicationDetailsPage() {
       !isSignatureRoute &&
       details?.current_user_permissions.can_answer &&
       details.application_status !== "approved" &&
-      details.application_status !== "rejected"
+      details.application_status !== "rejected" &&
+      details.application_status !== "withdrawn"
   );
-  const canEditApplicantSignatories = Boolean(
-    isApplicantRoute && details?.current_user_permissions.can_edit_signatories
+  const canEditSignatories = Boolean(
+    !isSignatureRoute && details?.current_user_permissions.can_edit_signatories
   );
+  const canWithdrawApplication = Boolean(
+    details?.current_user_permissions.can_withdraw
+  );
+  const shouldSaveSignatoriesWithGsroSettings = Boolean(
+    canEditSignatories && details?.reviewers.length
+  );
+  const canSaveGsroSettings = Boolean(
+    canEditAnswers || shouldSaveSignatoriesWithGsroSettings
+  );
+  const gsroSaveButtonLabel = canEditSignatories
+    ? "Save Settings"
+    : "Save GSRO Answers";
   const reviewerItems = details ? buildReviewerItems(details.reviewers) : [];
   const backTo =
     typeof location.state === "object" &&
@@ -366,6 +526,40 @@ export default function ApplicationDetailsPage() {
     setSubmitError("");
   };
 
+  const updateSignatoryQuestionComment = (
+    applicationSignatoryId: string,
+    questionId: string,
+    commentText: string
+  ) => {
+    setSignatoryQuestionCommentDrafts((currentDrafts) => ({
+      ...currentDrafts,
+      [applicationSignatoryId]: {
+        ...(currentDrafts[applicationSignatoryId] || {}),
+        [questionId]: commentText
+      }
+    }));
+    setSignatoryQuestionCommentErrors((currentErrors) => {
+      if (!currentErrors[applicationSignatoryId]?.[questionId]) {
+        return currentErrors;
+      }
+
+      const nextSignatoryErrors = {
+        ...currentErrors[applicationSignatoryId]
+      };
+      delete nextSignatoryErrors[questionId];
+
+      const nextErrors = { ...currentErrors };
+      if (Object.keys(nextSignatoryErrors).length === 0) {
+        delete nextErrors[applicationSignatoryId];
+      } else {
+        nextErrors[applicationSignatoryId] = nextSignatoryErrors;
+      }
+
+      return nextErrors;
+    });
+    setSubmitError("");
+  };
+
   const updateSignatorySelection = (signatoryId: string, signerUserId: string) => {
     setSignatorySelections((currentSelections) => ({
       ...currentSelections,
@@ -379,112 +573,257 @@ export default function ApplicationDetailsPage() {
     setSubmitError("");
   };
 
-  const handleSaveAnswers = async (event: FormEvent<HTMLFormElement>) => {
+  const buildSignatoryDecisionQuestionComments = (
+    applicationSignatoryId: string
+  ) => {
+    if (!details) {
+      return [];
+    }
+
+    return details.form.sections.flatMap((section) =>
+      section.questions.flatMap((question) => {
+        const commentText =
+          signatoryQuestionCommentDrafts[applicationSignatoryId]?.[
+            question.question_id
+          ]?.trim() || "";
+
+        if (!commentText) {
+          return [];
+        }
+
+        return [
+          {
+            commentText,
+            questionId: question.question_id
+          }
+        ];
+      })
+    );
+  };
+
+  const clearSignatoryQuestionCommentErrors = (
+    applicationSignatoryId: string
+  ) => {
+    setSignatoryQuestionCommentErrors((currentErrors) => {
+      if (!currentErrors[applicationSignatoryId]) {
+        return currentErrors;
+      }
+
+      const nextErrors = { ...currentErrors };
+      delete nextErrors[applicationSignatoryId];
+      return nextErrors;
+    });
+  };
+
+  const handleSaveGsroSettings = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
     if (!token || !details) {
       return;
     }
 
-    const nextErrors = validateQuestionDrafts(details, drafts);
-    setQuestionErrors(nextErrors);
+    if (canEditAnswers) {
+      const nextErrors = validateQuestionDrafts(details, drafts);
+      setQuestionErrors(nextErrors);
 
-    if (Object.keys(nextErrors).length > 0) {
-      setSubmitError("Complete the required GSRO answers before saving.");
-      return;
+      if (Object.keys(nextErrors).length > 0) {
+        setSubmitError("Complete the required GSRO answers before saving.");
+        return;
+      }
+    }
+
+    if (shouldSaveSignatoriesWithGsroSettings) {
+      const nextErrors = validateSignatorySelections(details, signatorySelections);
+      setSignatoryErrors(nextErrors);
+
+      if (Object.keys(nextErrors).length > 0) {
+        setSubmitError(
+          "Complete the required signatory assignments before saving."
+        );
+        return;
+      }
     }
 
     try {
       setIsSavingAnswers(true);
       setSubmitError("");
-      await updateApplicationAnswers(token, details.application_id, {
-        answers: details.form.sections.flatMap((section) =>
-          section.questions.map((question) => {
-            const draft = drafts[question.question_id];
 
-            return {
-              answerDate: draft.answerDate || undefined,
-              answerNumber: draft.answerNumber ? Number(draft.answerNumber) : undefined,
-              answerText: draft.answerText.trim() || undefined,
-              commentText: draft.commentText.trim() || undefined,
-              optionIds: draft.optionIds.length ? draft.optionIds : undefined,
-              questionId: question.question_id
-            };
-          })
-        )
-      });
-      success(
-        "GSRO answers saved successfully. The application is now ready for signatory approval.",
-        "Answers Saved"
-      );
+      if (shouldSaveSignatoriesWithGsroSettings) {
+        await updateApplicationSignatories(token, details.application_id, {
+          signatories: details.form.signatories.map((signatory) => ({
+            signatoryId: signatory.signatory_id,
+            signerUserId: signatorySelections[signatory.signatory_id] || undefined
+          }))
+        });
+      }
+
+      if (canEditAnswers) {
+        await updateApplicationAnswers(token, details.application_id, {
+          answers: details.form.sections.flatMap((section) =>
+            section.questions.map((question) => {
+              const draft = drafts[question.question_id];
+
+              return {
+                answerDate: draft.answerDate || undefined,
+                answerNumber: draft.answerNumber
+                  ? Number(draft.answerNumber)
+                  : undefined,
+                answerText: draft.answerText.trim() || undefined,
+                commentText: draft.commentText.trim() || undefined,
+                optionIds: draft.optionIds.length ? draft.optionIds : undefined,
+                questionId: question.question_id
+              };
+            })
+          )
+        });
+      }
+
+      if (canEditAnswers && shouldSaveSignatoriesWithGsroSettings) {
+        success(
+          "GSRO answers and signatory assignments saved successfully. The application is now ready for signatory approval.",
+          "Settings Saved"
+        );
+      } else if (canEditAnswers) {
+        success(
+          "GSRO answers saved successfully. The application is now ready for signatory approval.",
+          "Answers Saved"
+        );
+      } else if (shouldSaveSignatoriesWithGsroSettings) {
+        success(
+          "The signatory assignments have been updated.",
+          "Signatories Updated"
+        );
+      }
+
       await loadDetails();
     } catch (error) {
       setSubmitError(
-        error instanceof Error ? error.message : "Failed to save answers."
+        error instanceof Error ? error.message : "Failed to save settings."
       );
     } finally {
       setIsSavingAnswers(false);
     }
   };
 
-  const handleSignSignatory = async (applicationSignatoryId: string) => {
-    if (!token || !details) {
+  const handleWithdrawApplication = async () => {
+    if (!token || !details || !canWithdrawApplication) {
+      return;
+    }
+
+    const shouldWithdraw = window.confirm(
+      "Withdraw this application? It will become read-only and no further review or signature action will happen."
+    );
+
+    if (!shouldWithdraw) {
       return;
     }
 
     try {
-      setSigningSignatoryId(applicationSignatoryId);
+      setIsWithdrawing(true);
+      setPageError("");
       setSubmitError("");
-      await approveApplicationSignatory(
-        token,
-        details.application_id,
-        applicationSignatoryId
-      );
-      success("Your signature has been recorded.", "Application Signed");
 
+      await withdrawApplication(token, details.application_id);
+      success("Your application has been withdrawn.", "Application Withdrawn");
       await loadDetails();
     } catch (error) {
-      setSubmitError(
-        error instanceof Error ? error.message : "Failed to save signature."
+      setPageError(
+        error instanceof Error
+          ? error.message
+          : "Failed to withdraw this application."
       );
     } finally {
-      setSigningSignatoryId("");
+      setIsWithdrawing(false);
     }
   };
 
-  const handleSaveSignatories = async () => {
+  const handleSubmitSignatoryDecision = async (
+    applicationSignatoryId: string,
+    decision: SignatoryDecisionType
+  ) => {
     if (!token || !details) {
       return;
     }
 
-    const nextErrors = validateSignatorySelections(details, signatorySelections);
-    setSignatoryErrors(nextErrors);
+    const questionComments =
+      decision === "reject" || isRevisionMode
+        ? buildSignatoryDecisionQuestionComments(applicationSignatoryId)
+        : [];
+    const targetSignatory = details.signatories.find(
+      (signatory) =>
+        signatory.application_signatory_id === applicationSignatoryId
+    );
 
-    if (Object.keys(nextErrors).length > 0) {
-      setSubmitError("Complete the required signatory selections before saving.");
+    if (decision === "approve" && isRevisionMode && questionComments.length > 0) {
+      setSignatoryQuestionCommentErrors((currentErrors) => ({
+        ...currentErrors,
+        [applicationSignatoryId]: Object.fromEntries(
+          questionComments.map((questionComment) => [
+            questionComment.questionId,
+            "Clear this comment before approving."
+          ])
+        )
+      }));
+      setSubmitError("Clear all question comments before approving this application.");
+      setActiveSignatoryId(applicationSignatoryId);
+      setIsRevisionMode(true);
+      return;
+    }
+
+    const invalidDecisionMessage = getInvalidSignatoryDecisionMessage(
+      decision,
+      decision === "reject" ? questionComments.length : 0
+    );
+
+    if (invalidDecisionMessage) {
+      setSubmitError(invalidDecisionMessage);
+      setActiveSignatoryId(applicationSignatoryId);
+      setIsRevisionMode(true);
       return;
     }
 
     try {
-      setIsSavingSignatories(true);
-      setSubmitError("");
-      await updateApplicationSignatories(token, details.application_id, {
-        signatories: details.form.signatories.map((signatory) => ({
-          signatoryId: signatory.signatory_id,
-          signerUserId: signatorySelections[signatory.signatory_id] || undefined
-        }))
+      setSavingDecision({
+        applicationSignatoryId,
+        decision
       });
-      success(
-        "Your selected signatories have been updated.",
-        "Signatories Updated"
-      );
+      clearSignatoryQuestionCommentErrors(applicationSignatoryId);
+      setSubmitError("");
+      setActiveSignatoryId(applicationSignatoryId);
+
+      if (decision === "approve") {
+        await approveApplicationSignatory(
+          token,
+          details.application_id,
+          applicationSignatoryId
+        );
+        success("Your signature has been recorded.", "Application Signed");
+      } else {
+        await rejectApplicationSignatory(
+          token,
+          details.application_id,
+          applicationSignatoryId,
+          {
+            questionComments
+          }
+        );
+        success(
+          "Your revision request has been recorded.",
+          "Revision Requested"
+        );
+      }
+
       await loadDetails();
     } catch (error) {
       setSubmitError(
-        error instanceof Error ? error.message : "Failed to update signatories."
+        error instanceof Error
+          ? error.message
+          : decision === "approve"
+            ? "Failed to save signature."
+            : "Failed to request revision for this application."
       );
     } finally {
-      setIsSavingSignatories(false);
+      setSavingDecision(null);
     }
   };
 
@@ -694,60 +1033,192 @@ export default function ApplicationDetailsPage() {
     );
   };
 
+  const renderSignatoryQuestionComments = (
+    question: FormApplicationQuestionSnapshot
+  ) => {
+    const activePendingSignatoryId =
+      activePendingSignatory?.application_signatory_id || "";
+    const canEditCommentsAsActiveSignatory = Boolean(
+      isSignatureRoute && activePendingSignatory && isRevisionMode
+    );
+    const visibleQuestionComments = question.question_comments.filter(
+      (questionComment) =>
+        !canEditCommentsAsActiveSignatory ||
+        questionComment.application_signatory_id !==
+          activePendingSignatoryId
+    );
+    const activeDraftValue =
+      activePendingSignatoryId &&
+      signatoryQuestionCommentDrafts[activePendingSignatoryId]?.[
+        question.question_id
+      ]
+        ? signatoryQuestionCommentDrafts[
+            activePendingSignatoryId
+          ][question.question_id]
+        : "";
+    const activeCommentError =
+      activePendingSignatoryId &&
+      signatoryQuestionCommentErrors[activePendingSignatoryId]?.[
+        question.question_id
+      ]
+        ? signatoryQuestionCommentErrors[activePendingSignatoryId][
+            question.question_id
+          ]
+        : "";
+
+    if (!visibleQuestionComments.length && !canEditCommentsAsActiveSignatory) {
+      return null;
+    }
+
+    return (
+      <div className="space-y-3 rounded-lg border border-dashed bg-muted-100/20 p-4">
+        <div className="space-y-2">
+          <Label>Signatory Comments</Label>
+          {visibleQuestionComments.length ? (
+            <div className="space-y-2">
+              {visibleQuestionComments.map((questionComment) => (
+                <div
+                  key={questionComment.application_question_comment_id}
+                  className="rounded-md border bg-white px-3 py-3"
+                >
+                  <p className="text-xs font-semibold uppercase tracking-wide text-pup-maroon">
+                    {getQuestionCommentAuthorLabel(questionComment)}
+                  </p>
+                  <p className="mt-2 text-sm text-ink-900">
+                    {questionComment.comment_text}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No signatory comments yet.
+            </p>
+          )}
+        </div>
+
+        {canEditCommentsAsActiveSignatory ? (
+          <div className="space-y-2">
+            <Label
+              htmlFor={`signatory-comment-${activePendingSignatoryId}-${question.question_id}`}
+            >
+              Revision Comment
+            </Label>
+            <Textarea
+              id={`signatory-comment-${activePendingSignatoryId}-${question.question_id}`}
+              placeholder="Add the revision needed for this question"
+              value={activeDraftValue}
+              onChange={(event) =>
+                updateSignatoryQuestionComment(
+                  activePendingSignatoryId,
+                  question.question_id,
+                  event.target.value
+                )
+              }
+              disabled={Boolean(savingDecision)}
+            />
+            {activeCommentError ? (
+              <p className="text-xs font-medium text-destructive">
+                {activeCommentError}
+              </p>
+            ) : null}
+            <p className="text-xs text-muted-foreground">
+              This comment will be visible to the other signatories and saved only if you request revision.
+            </p>
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
   return (
     <>
       <LoadingModal
-        open={isLoading || isSavingAnswers || Boolean(signingSignatoryId) || isSavingSignatories}
+        open={
+          isLoading ||
+          isSavingAnswers ||
+          isWithdrawing ||
+          Boolean(savingDecision)
+        }
         title={
-          isSavingAnswers
-            ? "Saving answers"
-            : isSavingSignatories
-              ? "Saving signatories"
-            : signingSignatoryId
-              ? "Saving signature"
-              : "Loading application"
+          isWithdrawing
+            ? "Withdrawing application"
+            : isSavingAnswers
+            ? shouldSaveSignatoriesWithGsroSettings
+              ? "Saving settings"
+              : "Saving answers"
+            : savingDecision
+                ? savingDecision.decision === "approve"
+                  ? "Saving signature"
+                  : "Saving revision request"
+                : "Loading application"
         }
         description={
-          isSavingAnswers
-            ? "We are saving the GSRO answers for this application."
-            : isSavingSignatories
-              ? "We are saving the updated signatory selections for this application."
-            : signingSignatoryId
-              ? "We are recording your signature for this signatory step."
-              : "We are preparing the full application workflow details."
+          isWithdrawing
+            ? "We are withdrawing this application and closing the review workflow."
+            : isSavingAnswers
+            ? shouldSaveSignatoriesWithGsroSettings
+              ? "We are saving the GSRO answers and signatory assignments for this application."
+              : "We are saving the GSRO answers for this application."
+            : savingDecision
+                ? savingDecision.decision === "approve"
+                  ? "We are recording your signature for this signatory step."
+                  : "We are saving your signatory comments and revision request."
+                : "We are preparing the full application workflow details."
         }
       />
 
       <PageContainer className="pb-10">
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex items-start justify-between gap-3">
           <SectionHeader
             eyebrow="Applications"
             title={details?.form_name_snapshot || "Application Details"}
             description={
               isApplicantRoute
-                ? "This applicant view shows the current GSRO answers and lets you update your chosen signatories while the application is still pending."
+                ? details?.application_status === "withdrawn"
+                  ? "This application has been withdrawn. The GSRO answers and signatory assignments are now read-only."
+                  : "This applicant view shows the current GSRO answers and the signatory assignments managed by GSRO."
                 : isSignatureRoute
-                  ? "Review the answered form and record your signature once GSRO has completed all questions."
-                : "This screen reflects the staged workflow: applicant selects signatories, GSRO completes answers, and signatories approve at the end."
+                  ? "Review the answered form, add any question comments, and either approve it or request revision once GSRO has completed all questions."
+                  : "This screen lets GSRO complete the review answers and assign the signatories before approval."
             }
           />
 
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => navigate(backTo)}
-          >
-            <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-            {backLabel}
-          </Button>
+          <div className="flex flex-wrap justify-end gap-3">
+            {canWithdrawApplication ? (
+              <Button
+                type="button"
+                variant="outline"
+                className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                disabled={
+                  isWithdrawing || isSavingAnswers || Boolean(savingDecision)
+                }
+                onClick={() => void handleWithdrawApplication()}
+              >
+                {isWithdrawing ? "Withdrawing..." : "Withdraw Application"}
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => navigate(backTo)}
+            >
+              <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+              {backLabel}
+            </Button>
+          </div>
         </div>
 
-        {pageError && !details ? (
+        {pageError ? (
           <Card className="mt-8 border-destructive/30">
             <CardContent className="flex flex-col gap-3 p-6">
               <div className="flex items-center gap-2 text-destructive">
                 <AlertCircle className="h-5 w-5" aria-hidden="true" />
-                <p className="font-semibold">Unable to load this application.</p>
+                <p className="font-semibold">
+                  {details
+                    ? "We could not complete that request."
+                    : "Unable to load this application."}
+                </p>
               </div>
               <p className="text-sm text-muted-foreground">{pageError}</p>
             </CardContent>
@@ -759,7 +1230,10 @@ export default function ApplicationDetailsPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
-                  <FileText className="h-5 w-5 text-pup-maroon" aria-hidden="true" />
+                  <FileText
+                    className="h-5 w-5 text-pup-maroon"
+                    aria-hidden="true"
+                  />
                   Workflow Summary
                 </CardTitle>
                 <CardDescription>
@@ -798,7 +1272,10 @@ export default function ApplicationDetailsPage() {
                       className="mt-1 inline-flex items-center gap-1 text-sm font-medium text-pup-maroon underline-offset-4 hover:underline"
                     >
                       Open Google Drive Link
-                      <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                      <ExternalLink
+                        className="h-3.5 w-3.5"
+                        aria-hidden="true"
+                      />
                     </a>
                   ) : (
                     <p className="mt-1 text-sm font-medium text-ink-900">
@@ -837,104 +1314,109 @@ export default function ApplicationDetailsPage() {
               <CardHeader>
                 <CardTitle>Assigned Signatories</CardTitle>
                 <CardDescription>
-                  {canEditApplicantSignatories
-                    ? "This application is still pending, so the applicant can still update the signatory assignments."
-                    : "Applicant-chosen signatories who will approve after GSRO completes the answers."}
+                  {canEditSignatories
+                    ? "GSRO assigns the reviewers who will sign this application while approval is still pending. These assignments are saved with the button below."
+                    : isApplicantRoute
+                      ? "GSRO manages the reviewer assignments for this application."
+                      : "Assigned reviewers who will approve after GSRO completes the answers."}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
-                {canEditApplicantSignatories && !details.reviewers.length ? (
+                {canEditSignatories && !details.reviewers.length ? (
                   <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
                     No active PROGRAM_REVIEWER users are available right now, so
-                    the signatory assignments cannot be updated yet.
+                    GSRO cannot assign signatories yet.
                   </div>
                 ) : null}
 
-                {canEditApplicantSignatories
-                  ? details.form.signatories.map((signatory, signatoryIndex) => {
-                      const assignment =
-                        details.signatories.find(
-                          (applicationSignatory) =>
-                            applicationSignatory.signatory_id ===
-                            signatory.signatory_id
-                        ) || null;
-                      const selectedReviewer =
-                        details.reviewers.find(
-                          (reviewer) =>
-                            reviewer.user_id ===
-                            signatorySelections[signatory.signatory_id]
-                        ) || null;
-                      const signatoryError =
-                        signatoryErrors[signatory.signatory_id];
+                {canEditSignatories
+                  ? details.form.signatories.map(
+                      (signatory, signatoryIndex) => {
+                        const assignment =
+                          details.signatories.find(
+                            (applicationSignatory) =>
+                              applicationSignatory.signatory_id ===
+                              signatory.signatory_id,
+                          ) || null;
+                        const selectedReviewer =
+                          details.reviewers.find(
+                            (reviewer) =>
+                              reviewer.user_id ===
+                              signatorySelections[signatory.signatory_id],
+                          ) || null;
+                        const signatoryError =
+                          signatoryErrors[signatory.signatory_id];
 
-                      return (
-                        <div
-                          key={signatory.signatory_id}
-                          className="rounded-lg border bg-white p-4 shadow-sm"
-                        >
-                          <div className="flex flex-col gap-3 lg:grid lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
-                            <div>
-                              <p className="text-sm font-semibold text-ink-900">
-                                Signatory {signatoryIndex + 1}:{" "}
-                                {signatory.position_name}
-                              </p>
-                              <p className="mt-1 text-sm text-muted-foreground">
-                                {signatory.description ||
-                                  "Assign the reviewer who should approve this stage."}
-                              </p>
-                              <div className="mt-2 flex flex-wrap items-center gap-2">
-                                <p className="text-xs font-medium uppercase tracking-wide text-pup-maroon">
-                                  {signatory.is_required ? "Required" : "Optional"}
+                        return (
+                          <div
+                            key={signatory.signatory_id}
+                            className="rounded-lg border bg-white p-4 shadow-sm"
+                          >
+                            <div className="flex flex-col gap-3 lg:grid lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
+                              <div>
+                                <p className="text-sm font-semibold text-ink-900">
+                                  Signatory {signatoryIndex + 1}:{" "}
+                                  {signatory.position_name}
                                 </p>
-                                <span className="rounded-full bg-muted-100 px-3 py-1 text-xs font-medium text-muted-foreground">
-                                  {assignment?.signatory_status === "pending"
-                                    ? "Pending"
-                                    : assignment?.signatory_status === "skipped"
-                                      ? "Skipped"
-                                      : assignment?.signatory_status === "signed"
-                                        ? "Approved"
-                                        : assignment?.signatory_status === "rejected"
-                                          ? "Rejected"
-                                          : "Pending"}
-                                </span>
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                  {signatory.description ||
+                                    "Assign the reviewer who should approve this stage."}
+                                </p>
+                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                  <p className="text-xs font-medium uppercase tracking-wide text-pup-maroon">
+                                    {signatory.is_required
+                                      ? "Required"
+                                      : "Optional"}
+                                  </p>
+                                  <span className="rounded-full bg-muted-100 px-3 py-1 text-xs font-medium text-muted-foreground">
+                                    {getSignatoryStatusLabel(
+                                      assignment?.signatory_status,
+                                      assignment?.signer_user_id,
+                                    )}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="space-y-2">
+                                <Label>Select reviewer</Label>
+                                <Combobox
+                                  items={reviewerItems}
+                                  placeholder="Choose a PROGRAM_REVIEWER"
+                                  searchPlaceholder="Search reviewer"
+                                  value={
+                                    signatorySelections[
+                                      signatory.signatory_id
+                                    ] || ""
+                                  }
+                                  onValueChange={(value) =>
+                                    updateSignatorySelection(
+                                      signatory.signatory_id,
+                                      value,
+                                    )
+                                  }
+                                />
+                                {signatoryError ? (
+                                  <p className="text-xs font-medium text-destructive">
+                                    {signatoryError}
+                                  </p>
+                                ) : null}
+                                {selectedReviewer ? (
+                                  <p className="text-xs text-muted-foreground">
+                                    {buildReviewerLabel(selectedReviewer)}
+                                    {selectedReviewer.program
+                                      ? ` | ${selectedReviewer.program}`
+                                      : ""}
+                                    {selectedReviewer.email
+                                      ? ` | ${selectedReviewer.email}`
+                                      : ""}
+                                  </p>
+                                ) : null}
                               </div>
                             </div>
-
-                            <div className="space-y-2">
-                              <Label>Select reviewer</Label>
-                              <Combobox
-                                items={reviewerItems}
-                                placeholder="Choose a PROGRAM_REVIEWER"
-                                searchPlaceholder="Search reviewer"
-                                value={signatorySelections[signatory.signatory_id] || ""}
-                                onValueChange={(value) =>
-                                  updateSignatorySelection(
-                                    signatory.signatory_id,
-                                    value
-                                  )
-                                }
-                              />
-                              {signatoryError ? (
-                                <p className="text-xs font-medium text-destructive">
-                                  {signatoryError}
-                                </p>
-                              ) : null}
-                              {selectedReviewer ? (
-                                <p className="text-xs text-muted-foreground">
-                                  {buildReviewerLabel(selectedReviewer)}
-                                  {selectedReviewer.program
-                                    ? ` | ${selectedReviewer.program}`
-                                    : ""}
-                                  {selectedReviewer.email
-                                    ? ` | ${selectedReviewer.email}`
-                                    : ""}
-                                </p>
-                              ) : null}
-                            </div>
                           </div>
-                        </div>
-                      );
-                    })
+                        );
+                      },
+                    )
                   : details.signatories.map((signatory) => (
                       <div
                         key={signatory.application_signatory_id}
@@ -954,13 +1436,10 @@ export default function ApplicationDetailsPage() {
                           </div>
                           <div className="space-y-2 text-sm">
                             <p className="font-medium text-ink-900">
-                              {signatory.signatory_status === "signed"
-                                ? "Approved"
-                                : signatory.signatory_status === "rejected"
-                                  ? "Rejected"
-                                  : signatory.signatory_status === "pending"
-                                    ? "Pending"
-                                    : "Skipped"}
+                              {getSignatoryStatusLabel(
+                                signatory.signatory_status,
+                                signatory.signer_user_id,
+                              )}
                             </p>
                             {signatory.remarks ? (
                               <p className="mt-1 text-muted-foreground">
@@ -968,56 +1447,82 @@ export default function ApplicationDetailsPage() {
                               </p>
                             ) : null}
                             {isActionablePendingSignatory(signatory) ? (
-                              <Button
-                                type="button"
-                                disabled={Boolean(signingSignatoryId)}
-                                onClick={() =>
-                                  handleSignSignatory(
+                              <div className="space-y-2">
+                                {assignedActionableSignatories.length > 1 ? (
+                                  <Button
+                                    type="button"
+                                    variant={
+                                      activePendingSignatory?.application_signatory_id ===
+                                      signatory.application_signatory_id
+                                        ? "secondary"
+                                        : "outline"
+                                    }
+                                    onClick={() =>
+                                      setActiveSignatoryId(
+                                        signatory.application_signatory_id,
+                                      )
+                                    }
+                                  >
+                                    {activePendingSignatory?.application_signatory_id ===
                                     signatory.application_signatory_id
-                                  )
-                                }
-                              >
-                                <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                                {signingSignatoryId ===
-                                signatory.application_signatory_id
-                                  ? "Signing..."
-                                  : "Signed"}
-                              </Button>
+                                      ? "Reviewing Below"
+                                      : "Review Questions"}
+                                  </Button>
+                                ) : (
+                                  <p className="text-xs text-muted-foreground">
+                                    Use the review section below to approve or
+                                    reject this step.
+                                  </p>
+                                )}
+                              </div>
                             ) : null}
                           </div>
                         </div>
                       </div>
                     ))}
 
-                {canEditApplicantSignatories ? (
-                  <div className="flex justify-end pt-2">
-                    <Button
-                      type="button"
-                      disabled={isSavingSignatories || isLoading || !details.reviewers.length}
-                      onClick={handleSaveSignatories}
-                    >
-                      <Save className="h-4 w-4" aria-hidden="true" />
-                      {isSavingSignatories ? "Saving..." : "Save Signatories"}
-                    </Button>
-                  </div>
-                ) : null}
               </CardContent>
             </Card>
 
             {isApplicantRoute || isSignatureRoute ? (
               <Card className="border-pup-maroon/15 bg-[#fff7ef]">
                 <CardContent className="flex items-center gap-3 p-4 text-sm text-ink-900">
-                  <FileText className="h-5 w-5 text-pup-maroon" aria-hidden="true" />
+                  <FileText
+                    className="h-5 w-5 text-pup-maroon"
+                    aria-hidden="true"
+                  />
                   <p>
                     {isApplicantRoute
-                      ? "You are viewing the current answers provided by GSRO. This part is read-only for applicants."
-                      : "You are reviewing the current answers provided by GSRO. Signatories cannot change form answers here."}
+                      ? details.application_status === "withdrawn"
+                        ? "You withdrew this application. The answers remain visible for reference only."
+                        : "You are viewing the current answers provided by GSRO. This part is read-only for applicants."
+                      : "You are reviewing the current answers provided by GSRO. Signatories cannot change form answers here. Per-question comments are available only when requesting revision."}
                   </p>
                 </CardContent>
               </Card>
             ) : null}
 
-            <form className="space-y-6" onSubmit={handleSaveAnswers}>
+            <form className="space-y-6" onSubmit={handleSaveGsroSettings}>
+              {canApproveAsSignatory && activePendingSignatory ? (
+                <Card className="border-pup-maroon/15 bg-[#fff7ef]">
+                  <CardContent className="flex flex-col gap-2 p-4 text-sm text-ink-900">
+                    <p className="font-semibold">
+                      Reviewing signatory step:{" "}
+                      {activePendingSignatory.position_name_snapshot}
+                    </p>
+                    <p>
+                      {isRevisionMode
+                        ? isReopenedRejectedSignatory
+                          ? "Review or update your saved question comments. At least one comment is required if this application should stay in revision."
+                          : "Add question comments where needed. Comments are visible to the other signatories. At least one question comment is required if you request revision on this application."
+                        : isReopenedRejectedSignatory
+                          ? "You can sign this reopened application now. If more changes are needed, switch to revision mode to review or update your question comments."
+                          : "You can sign this application now. If changes are needed, switch to revision mode and add question comments before requesting revision."}
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : null}
+
               {details.form.sections.map((section, sectionIndex) => (
                 <Card key={section.section_id} className="overflow-visible">
                   <CardHeader className="rounded-t-lg bg-[linear-gradient(135deg,#800000,#9a2424)] text-white">
@@ -1025,7 +1530,8 @@ export default function ApplicationDetailsPage() {
                       Section {sectionIndex + 1}: {section.section_name}
                     </CardTitle>
                     <CardDescription className="text-white/80">
-                      {section.description || "Application questions for GSRO review."}
+                      {section.description ||
+                        "Application questions for GSRO review."}
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-5 bg-[#fffdf8] pt-6">
@@ -1067,21 +1573,28 @@ export default function ApplicationDetailsPage() {
                             </p>
                           ) : null}
 
-                          {canEditAnswers &&
-                          question.has_comment ? (
+                          {canEditAnswers && question.has_comment ? (
                             <div className="space-y-2">
-                              <Label htmlFor={`comment-${question.question_id}`}>
+                              <Label
+                                htmlFor={`comment-${question.question_id}`}
+                              >
                                 Comment
                               </Label>
                               <Textarea
                                 id={`comment-${question.question_id}`}
                                 placeholder="Optional GSRO note"
-                                value={drafts[question.question_id]?.commentText || ""}
+                                value={
+                                  drafts[question.question_id]?.commentText ||
+                                  ""
+                                }
                                 onChange={(event) =>
-                                  updateDraft(question.question_id, (currentDraft) => ({
-                                    ...currentDraft,
-                                    commentText: event.target.value
-                                  }))
+                                  updateDraft(
+                                    question.question_id,
+                                    (currentDraft) => ({
+                                      ...currentDraft,
+                                      commentText: event.target.value,
+                                    }),
+                                  )
                                 }
                               />
                             </div>
@@ -1093,6 +1606,8 @@ export default function ApplicationDetailsPage() {
                               </p>
                             </div>
                           ) : null}
+
+                          {renderSignatoryQuestionComments(question)}
                         </div>
                       </div>
                     ))}
@@ -1106,16 +1621,113 @@ export default function ApplicationDetailsPage() {
                 </div>
               ) : null}
 
-              {canEditAnswers ? (
+              {canSaveGsroSettings ? (
                 <div className="flex justify-end">
                   <Button type="submit" disabled={isSavingAnswers}>
                     <Save className="h-4 w-4" aria-hidden="true" />
-                    {isSavingAnswers ? "Saving..." : "Save GSRO Answers"}
+                    {isSavingAnswers ? "Saving..." : gsroSaveButtonLabel}
                   </Button>
                 </div>
               ) : null}
-            </form>
 
+              {canApproveAsSignatory && activePendingSignatory ? (
+                <div className="flex flex-col gap-4 rounded-lg border bg-white p-4 shadow-sm">
+                  <div className="space-y-1">
+                    <p className="text-sm font-semibold text-ink-900">
+                      Signatory Decision
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      {isRevisionMode
+                        ? isReopenedRejectedSignatory
+                          ? `Choosing Still for Revision will update the saved question comments for ${activePendingSignatory.position_name_snapshot}.`
+                          : `Comments entered above will be saved for ${activePendingSignatory.position_name_snapshot} only if you request revision.`
+                        : isReopenedRejectedSignatory
+                          ? `Signing now will clear any earlier question comments for ${activePendingSignatory.position_name_snapshot}.`
+                          : "Signing now does not allow per-question comments. Use revision mode if you need to request changes."}
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                    <Button
+                      type="button"
+                      className="w-full sm:w-auto"
+                      disabled={Boolean(savingDecision)}
+                      onClick={() =>
+                        void handleSubmitSignatoryDecision(
+                          activePendingSignatory.application_signatory_id,
+                          "approve",
+                        )
+                      }
+                    >
+                      <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                      {savingDecision?.applicationSignatoryId ===
+                        activePendingSignatory.application_signatory_id &&
+                      savingDecision.decision === "approve"
+                        ? isReopenedRejectedSignatory
+                          ? "Signing Now..."
+                          : "Signing..."
+                        : isReopenedRejectedSignatory
+                          ? "Sign Now"
+                          : "Approve"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full sm:w-auto"
+                      disabled={Boolean(savingDecision)}
+                      onClick={() => {
+                        if (isRevisionMode) {
+                          void handleSubmitSignatoryDecision(
+                            activePendingSignatory.application_signatory_id,
+                            "reject",
+                          );
+                          return;
+                        }
+
+                        setActiveSignatoryId(
+                          activePendingSignatory.application_signatory_id,
+                        );
+                        clearSignatoryQuestionCommentErrors(
+                          activePendingSignatory.application_signatory_id,
+                        );
+                        setIsRevisionMode(true);
+                        setSubmitError("");
+                      }}
+                    >
+                      {isRevisionMode
+                        ? savingDecision?.applicationSignatoryId ===
+                              activePendingSignatory.application_signatory_id &&
+                            savingDecision.decision === "reject"
+                          ? isReopenedRejectedSignatory
+                            ? "Updating Revision..."
+                            : "Requesting Revision..."
+                          : isReopenedRejectedSignatory
+                            ? "Still for Revision"
+                            : "Request Revision"
+                        : isReopenedRejectedSignatory
+                          ? "Review Revision Comments"
+                          : "Start Revision Request"}
+                    </Button>
+                    {isRevisionMode ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="w-full sm:w-auto"
+                        disabled={Boolean(savingDecision)}
+                        onClick={() => {
+                          clearSignatoryQuestionCommentErrors(
+                            activePendingSignatory.application_signatory_id,
+                          );
+                          setIsRevisionMode(false);
+                          setSubmitError("");
+                        }}
+                      >
+                        Cancel Revision
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+            </form>
           </div>
         ) : null}
       </PageContainer>

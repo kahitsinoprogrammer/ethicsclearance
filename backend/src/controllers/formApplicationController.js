@@ -57,15 +57,19 @@ const getFormApplicationDetails = async (req, res, next) => {
   }
 };
 
-const downloadApplicationCertificate = async (req, res, next) => {
+const downloadApplicationReport = async (req, res, next) => {
   try {
-    const payload = await formApplicationService.downloadApplicationCertificate(
+    const payload = await formApplicationService.downloadApplicationReport(
       req.params.applicationId,
       req.user
     );
 
     res.setHeader("Cache-Control", "no-store");
-    res.setHeader("Content-Disposition", `attachment; filename="${payload.fileName}"`);
+    res.setHeader("Access-Control-Expose-Headers", "Content-Disposition, Content-Type");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${payload.fileName}"; filename*=UTF-8''${encodeURIComponent(payload.fileName)}`
+    );
     res.setHeader("Content-Type", payload.mimeType);
     res.status(200).send(payload.buffer);
   } catch (error) {
@@ -145,16 +149,30 @@ const rejectApplicationSignatory = async (req, res, next) => {
   }
 };
 
+const withdrawApplication = async (req, res, next) => {
+  try {
+    const payload = await formApplicationService.withdrawApplication(
+      req.params.applicationId,
+      req.user
+    );
+
+    res.status(200).json(payload);
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   approveApplicationSignatory,
   createFormApplication,
-  downloadApplicationCertificate,
+  downloadApplicationReport,
   getFormApplicationDetails,
   getFormApplicationTemplate,
   listApplicationsForSignature,
   listMyFormApplications,
   listFormApplications,
   rejectApplicationSignatory,
+  withdrawApplication,
   updateApplicationSignatories,
   updateApplicationAnswers
 };

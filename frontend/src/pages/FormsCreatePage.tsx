@@ -1,6 +1,7 @@
 import {
   ChevronRight,
   CircleHelp,
+  Copy,
   Pencil,
   Plus,
   RotateCcw,
@@ -145,6 +146,37 @@ const buildDefaultValues = (): CreateFormValues => ({
 
 const readSortOrder = (value: number | null | undefined, fallback: number) => {
   return typeof value === "number" && Number.isInteger(value) ? value : fallback;
+};
+
+const cloneQuestionValues = (
+  question: CreateFormQuestionValues,
+  sortOrder: number,
+): CreateFormQuestionValues => ({
+  questionText: question.questionText,
+  questionType: question.questionType,
+  hasComment: question.hasComment,
+  isRequired: question.isRequired,
+  isActive: question.isActive,
+  sortOrder,
+  options: question.options.map((option, optionIndex) => ({
+    optionLabel: option.optionLabel,
+    optionValue: option.optionValue,
+    sortOrder: readSortOrder(option.sortOrder, optionIndex),
+    isActive: option.isActive,
+  })),
+});
+
+const hasSequentialQuestionSortOrder = (questions: CreateFormQuestionValues[]) => {
+  return questions.every(
+    (question, index) => readSortOrder(question.sortOrder, index) === index,
+  );
+};
+
+const normalizeQuestionSortOrder = (questions: CreateFormQuestionValues[]) => {
+  return questions.map((question, index) => ({
+    ...question,
+    sortOrder: index,
+  }));
 };
 
 const mapQuestionOptionToValues = (
@@ -590,6 +622,7 @@ type SectionDetailsProps = {
   errors: FieldErrors<CreateFormValues>;
   getValues: UseFormGetValues<CreateFormValues>;
   onAddQuestion: (sectionIndex: number) => void;
+  onDuplicateQuestion: (sectionIndex: number, questionIndex: number) => void;
   onEditSection: (sectionIndex: number) => void;
   onRemoveQuestion: (sectionIndex: number, questionIndex: number) => void;
   onRemoveSection: (sectionIndex: number) => void;
@@ -605,6 +638,7 @@ function SectionDetails({
   errors,
   getValues,
   onAddQuestion,
+  onDuplicateQuestion,
   onEditSection,
   onRemoveQuestion,
   onRemoveSection,
@@ -706,8 +740,20 @@ function SectionDetails({
               setValue={setValue}
             />
 
-            {(questions?.length || 0) > 1 ? (
-              <div className="mt-3 flex justify-end">
+            <div className="mt-3 flex flex-wrap justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  onDuplicateQuestion(sectionIndex, activeQuestionIndex)
+                }
+              >
+                <Copy className="h-4 w-4" aria-hidden="true" />
+                Duplicate Question
+              </Button>
+
+              {(questions?.length || 0) > 1 ? (
                 <Button
                   type="button"
                   variant="secondary"
@@ -719,8 +765,8 @@ function SectionDetails({
                   <Trash2 className="h-4 w-4" aria-hidden="true" />
                   Remove Question
                 </Button>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
           </div>
         ) : (
           <div className="rounded-lg border border-dashed bg-white p-6 text-center">
@@ -1026,10 +1072,18 @@ export default function FormsCreatePage() {
   const addQuestionToSection = (sectionIndex: number) => {
     const questionsPath = `sections.${sectionIndex}.questions` as const;
     const currentQuestions = getValues(questionsPath) || [];
+    const shouldNormalizeSortOrder =
+      hasSequentialQuestionSortOrder(currentQuestions);
+    const nextQuestions = [
+      ...currentQuestions,
+      createDefaultQuestion(currentQuestions.length),
+    ];
 
     setValue(
       questionsPath,
-      [...currentQuestions, createDefaultQuestion(currentQuestions.length)],
+      shouldNormalizeSortOrder
+        ? normalizeQuestionSortOrder(nextQuestions)
+        : nextQuestions,
       {
         shouldDirty: true,
         shouldTouch: true,
@@ -1041,6 +1095,39 @@ export default function FormsCreatePage() {
     setActiveQuestionIndex(currentQuestions.length);
   };
 
+  const duplicateQuestionAt = (sectionIndex: number, questionIndex: number) => {
+    const questionsPath = `sections.${sectionIndex}.questions` as const;
+    const currentQuestions = getValues(questionsPath) || [];
+    const sourceQuestion = currentQuestions[questionIndex];
+
+    if (!sourceQuestion) {
+      return;
+    }
+
+    const shouldNormalizeSortOrder =
+      hasSequentialQuestionSortOrder(currentQuestions);
+    const nextQuestions = [
+      ...currentQuestions.slice(0, questionIndex + 1),
+      cloneQuestionValues(sourceQuestion, questionIndex + 1),
+      ...currentQuestions.slice(questionIndex + 1),
+    ];
+
+    setValue(
+      questionsPath,
+      shouldNormalizeSortOrder
+        ? normalizeQuestionSortOrder(nextQuestions)
+        : nextQuestions,
+      {
+        shouldDirty: true,
+        shouldTouch: true,
+        shouldValidate: true,
+      },
+    );
+
+    setActiveSectionIndex(sectionIndex);
+    setActiveQuestionIndex(questionIndex + 1);
+  };
+
   const removeQuestionAt = (sectionIndex: number, questionIndex: number) => {
     const questionsPath = `sections.${sectionIndex}.questions` as const;
     const currentQuestions = getValues(questionsPath) || [];
@@ -1049,9 +1136,17 @@ export default function FormsCreatePage() {
       return;
     }
 
+    const shouldNormalizeSortOrder =
+      hasSequentialQuestionSortOrder(currentQuestions);
+    const nextQuestions = currentQuestions.filter(
+      (_, index) => index !== questionIndex,
+    );
+
     setValue(
       questionsPath,
-      currentQuestions.filter((_, index) => index !== questionIndex),
+      shouldNormalizeSortOrder
+        ? normalizeQuestionSortOrder(nextQuestions)
+        : nextQuestions,
       {
         shouldDirty: true,
         shouldTouch: true,
@@ -1597,6 +1692,7 @@ export default function FormsCreatePage() {
               errors={errors}
               getValues={getValues}
               onAddQuestion={addQuestionToSection}
+              onDuplicateQuestion={duplicateQuestionAt}
               onEditSection={setEditingSectionIndex}
               onRemoveQuestion={removeQuestionAt}
               onRemoveSection={removeSectionAt}

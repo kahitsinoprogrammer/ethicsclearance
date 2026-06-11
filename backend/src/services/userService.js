@@ -11,6 +11,7 @@ const { hashPassword, verifyPassword } = require("../utils/password");
 const allowedUserTypes = ["GS Student", "Faculty", "Researcher", "Staff"];
 const allowedHonorifics = ["Mr.", "Ms.", "Dr.", "Prof.", "Mx."];
 const allowedStatuses = ["active", "inactive"];
+const APPLICANT_ROLE_CODE = "APPLICANT";
 const otpPattern = /^\d{6}$/;
 
 const normalizeString = (value) => {
@@ -44,6 +45,12 @@ const createNotFoundError = (message) => {
 const createForbiddenError = (message) => {
   const error = new Error(message);
   error.statusCode = 403;
+  return error;
+};
+
+const createServerError = (message) => {
+  const error = new Error(message);
+  error.statusCode = 500;
   return error;
 };
 
@@ -212,9 +219,16 @@ const registerUser = async (payload, actor) => {
   const validatedPayload = validateRegistrationPayload(payload);
   const program = await programModel.findProgramById(validatedPayload.programId);
   const isAdminRegistration = Boolean(actor);
+  const applicantRole = !isAdminRegistration
+    ? await roleModel.findRoleByCode(APPLICANT_ROLE_CODE)
+    : null;
 
   if (!program) {
     throw createValidationError("Selected program does not exist.");
+  }
+
+  if (!isAdminRegistration && !applicantRole) {
+    throw createServerError("Applicant role is not configured.");
   }
 
   if (validatedPayload.studentNo) {
@@ -227,21 +241,48 @@ const registerUser = async (payload, actor) => {
     }
   }
 
+  const client = await getPool().connect();
+  let isTransactionOpen = false;
+
   try {
-    const user = await userModel.createUser({
-      contactNo: validatedPayload.contactNo,
-      email: validatedPayload.email,
-      firstname: validatedPayload.firstName,
-      honorifics: validatedPayload.honorifics,
-      isVerified: isAdminRegistration,
-      lastname: validatedPayload.lastName,
-      middlename: validatedPayload.middleName,
-      password: hashPassword(validatedPayload.password),
-      program: program.program_name,
-      studentNo: validatedPayload.studentNo,
-      userType: validatedPayload.userType,
-      username: validatedPayload.username
-    });
+    await client.query("BEGIN");
+    isTransactionOpen = true;
+
+    const createdUser = await userModel.createUser(
+      {
+        contactNo: validatedPayload.contactNo,
+        email: validatedPayload.email,
+        firstname: validatedPayload.firstName,
+        honorifics: validatedPayload.honorifics,
+        isVerified: isAdminRegistration,
+        lastname: validatedPayload.lastName,
+        middlename: validatedPayload.middleName,
+        password: hashPassword(validatedPayload.password),
+        program: program.program_name,
+        studentNo: validatedPayload.studentNo,
+        userType: validatedPayload.userType,
+        username: validatedPayload.username
+      },
+      client
+    );
+
+    if (!isAdminRegistration) {
+      await userRoleModel.syncUserRoles(
+        {
+          assignedBy: null,
+          roleIds: [applicantRole.role_id],
+          userId: createdUser.user_id
+        },
+        client
+      );
+    }
+
+    await client.query("COMMIT");
+    isTransactionOpen = false;
+
+    const user = !isAdminRegistration
+      ? (await userModel.findUserById(createdUser.user_id)) || createdUser
+      : createdUser;
 
     if (isAdminRegistration) {
       return buildApiResponse(
@@ -267,12 +308,18 @@ const registerUser = async (payload, actor) => {
         : "Registration successful, but we could not send the verification code. Please request a new OTP."
     );
   } catch (error) {
+    if (isTransactionOpen) {
+      await client.query("ROLLBACK");
+    }
+
     if (error.code === "23505") {
       error.statusCode = 409;
       error.message = "Email, username, or student no. already exists.";
     }
 
     throw error;
+  } finally {
+    client.release();
   }
 };
 

@@ -2,8 +2,7 @@ import {
   AlertCircle,
   ArrowLeft,
   ClipboardCheck,
-  SendHorizontal,
-  UserRoundCheck
+  SendHorizontal
 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -19,7 +18,6 @@ import {
   CardHeader,
   CardTitle
 } from "@/components/ui/card";
-import { Combobox, type ComboboxItem } from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/contexts/AuthContext";
@@ -27,14 +25,12 @@ import { useToast } from "@/contexts/ToastContext";
 import {
   createFormApplication,
   fetchFormApplicationTemplate,
-  type FormApplicationTemplate,
-  type ReviewerUserRecord
+  type FormApplicationTemplate
 } from "@/lib/api";
 
 type ValidationErrors = {
   googleDriveLink?: string;
   researchTitle?: string;
-  signatories: Record<string, string>;
 };
 
 const GOOGLE_DRIVE_HOSTS = new Set([
@@ -43,45 +39,11 @@ const GOOGLE_DRIVE_HOSTS = new Set([
   "drive.usercontent.google.com"
 ]);
 
-const buildReviewerLabel = (reviewer: ReviewerUserRecord) => {
-  return reviewer.display_name || reviewer.email;
-};
-
-const buildReviewerItems = (reviewers: ReviewerUserRecord[]): ComboboxItem[] => {
-  return reviewers.map((reviewer) => ({
-    label: buildReviewerLabel(reviewer),
-    searchText: [
-      reviewer.display_name,
-      reviewer.email,
-      reviewer.program,
-      reviewer.username,
-      reviewer.user_type
-    ]
-      .filter(Boolean)
-      .join(" "),
-    value: reviewer.user_id
-  }));
-};
-
-const buildInitialSignatorySelections = (template: FormApplicationTemplate) => {
-  const selections: Record<string, string> = {};
-
-  template.form.signatories.forEach((signatory) => {
-    selections[signatory.signatory_id] = "";
-  });
-
-  return selections;
-};
-
-const validateSignatories = (
-  template: FormApplicationTemplate,
+const validateApplicationDetails = (
   googleDriveLink: string,
-  researchTitle: string,
-  signatorySelections: Record<string, string>
+  researchTitle: string
 ): ValidationErrors => {
-  const errors: ValidationErrors = {
-    signatories: {}
-  };
+  const errors: ValidationErrors = {};
 
   if (!researchTitle.trim()) {
     errors.researchTitle = "Research Title is required.";
@@ -104,21 +66,12 @@ const validateSignatories = (
     }
   }
 
-  template.form.signatories.forEach((signatory) => {
-    if (signatory.is_required && !signatorySelections[signatory.signatory_id]) {
-      errors.signatories[signatory.signatory_id] =
-        "Select a PROGRAM_REVIEWER user for this signatory.";
-    }
-  });
-
   return errors;
 };
 
 const hasValidationErrors = (validationErrors: ValidationErrors) => {
   return Boolean(
-    validationErrors.googleDriveLink ||
-    validationErrors.researchTitle ||
-      Object.keys(validationErrors.signatories).length > 0
+    validationErrors.googleDriveLink || validationErrors.researchTitle
   );
 };
 
@@ -130,12 +83,7 @@ export default function FormsApplyPage() {
   const [template, setTemplate] = useState<FormApplicationTemplate | null>(null);
   const [googleDriveLink, setGoogleDriveLink] = useState("");
   const [researchTitle, setResearchTitle] = useState("");
-  const [signatorySelections, setSignatorySelections] = useState<
-    Record<string, string>
-  >({});
-  const [validationErrors, setValidationErrors] = useState<ValidationErrors>({
-    signatories: {}
-  });
+  const [validationErrors, setValidationErrors] = useState<ValidationErrors>({});
   const [pageError, setPageError] = useState("");
   const [submitError, setSubmitError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -164,10 +112,7 @@ export default function FormsApplyPage() {
         setTemplate(result);
         setGoogleDriveLink("");
         setResearchTitle("");
-        setSignatorySelections(buildInitialSignatorySelections(result));
-        setValidationErrors({
-          signatories: {}
-        });
+        setValidationErrors({});
         setPageError("");
         setSubmitError("");
       } catch (error) {
@@ -191,25 +136,6 @@ export default function FormsApplyPage() {
       isMounted = false;
     };
   }, [formId, token]);
-
-  const reviewerItems = template ? buildReviewerItems(template.reviewers) : [];
-
-  const updateSignatorySelection = (signatoryId: string, signerUserId: string) => {
-    setSignatorySelections((currentSelections) => ({
-      ...currentSelections,
-      [signatoryId]: signerUserId
-    }));
-    setValidationErrors((currentErrors) => {
-      const nextErrors = { ...currentErrors.signatories };
-      delete nextErrors[signatoryId];
-
-      return {
-        ...currentErrors,
-        signatories: nextErrors
-      };
-    });
-    setSubmitError("");
-  };
 
   const updateGoogleDriveLink = (value: string) => {
     setGoogleDriveLink(value);
@@ -237,19 +163,15 @@ export default function FormsApplyPage() {
       return;
     }
 
-    const nextValidationErrors = validateSignatories(
-      template,
+    const nextValidationErrors = validateApplicationDetails(
       googleDriveLink,
-      researchTitle,
-      signatorySelections
+      researchTitle
     );
 
     setValidationErrors(nextValidationErrors);
 
     if (hasValidationErrors(nextValidationErrors)) {
-      setSubmitError(
-        "Complete the required application details and signatory selections before submitting."
-      );
+      setSubmitError("Complete the required application details before submitting.");
       return;
     }
 
@@ -258,14 +180,10 @@ export default function FormsApplyPage() {
       setSubmitError("");
       await createFormApplication(token, template.form.form_id, {
         googleDriveLink: googleDriveLink.trim(),
-        researchTitle: researchTitle.trim(),
-        signatories: template.form.signatories.map((signatory) => ({
-          signatoryId: signatory.signatory_id,
-          signerUserId: signatorySelections[signatory.signatory_id] || undefined
-        }))
+        researchTitle: researchTitle.trim()
       });
       success(
-        "The application has been started. GSRO can now complete the form answers before signatory approval begins.",
+        "The application has been started. GSRO can now assign signatories and complete the form review.",
         "Application Started"
       );
       navigate("/forms/apply", { replace: true });
@@ -287,8 +205,8 @@ export default function FormsApplyPage() {
         title={isSubmitting ? "Starting application" : "Loading application form"}
         description={
           isSubmitting
-            ? "We are saving the signatory selections for this applicant."
-            : "We are preparing the signatory assignment step."
+            ? "We are saving the application details for GSRO review."
+            : "We are preparing the application details step."
         }
       />
 
@@ -299,7 +217,7 @@ export default function FormsApplyPage() {
             title={template?.form.form_name || "Apply for form"}
             description={
               template?.form.description ||
-              "Choose the required signatories. The GSRO officer will answer the form questions after the application is started."
+              "Provide the research title and thesis link so GSRO can review the application and assign the signatories."
             }
           />
 
@@ -329,9 +247,10 @@ export default function FormsApplyPage() {
           <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
             <Card className="border-pup-maroon/15">
               <CardHeader>
-                <CardTitle>Research Title</CardTitle>
+                <CardTitle>Application Details</CardTitle>
                 <CardDescription>
-                  Provide the research title for this application before assigning its signatories.
+                  Enter the research title and thesis link. GSRO will handle the
+                  signatory assignments after the application is started.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -362,7 +281,8 @@ export default function FormsApplyPage() {
                     placeholder="https://drive.google.com/..."
                   />
                   <p className="text-xs text-muted-foreground">
-                    Share the thesis file or document link here so the Ethics Clearance Office can review it.
+                    Share the thesis file or document link here so the Ethics
+                    Clearance Office can review it.
                   </p>
                   {validationErrors.googleDriveLink ? (
                     <p className="text-xs font-medium text-destructive">
@@ -370,105 +290,6 @@ export default function FormsApplyPage() {
                     </p>
                   ) : null}
                 </div>
-              </CardContent>
-            </Card>
-
-            <Card className="overflow-visible border-pup-maroon/15">
-              <CardHeader className="rounded-t-lg bg-[#fff7ef]">
-                <CardTitle className="flex items-center gap-2 text-ink-900">
-                  <UserRoundCheck
-                    className="h-5 w-5 text-pup-maroon"
-                    aria-hidden="true"
-                  />
-                  Reviewer Signatories
-                </CardTitle>
-                <CardDescription>
-                  The applicant selects the reviewer signatories here. After this
-                  step, the GSRO officer will complete the question answers and
-                  then the selected signatories will approve the application.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4 pt-6">
-                {!template.reviewers.length ? (
-                  <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-                    No active PROGRAM_REVIEWER users are available right now, so
-                    this application cannot be started until one is assigned.
-                  </div>
-                ) : null}
-
-                {template.form.signatories.length ? (
-                  template.form.signatories.map((signatory, signatoryIndex) => {
-                    const selectedReviewer =
-                      template.reviewers.find(
-                        (reviewer) =>
-                          reviewer.user_id ===
-                          signatorySelections[signatory.signatory_id]
-                      ) || null;
-                    const signatoryError =
-                      validationErrors.signatories[signatory.signatory_id];
-
-                    return (
-                      <div
-                        key={signatory.signatory_id}
-                        className="rounded-lg border bg-white p-4 shadow-sm"
-                      >
-                        <div className="flex flex-col gap-3 lg:grid lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
-                          <div>
-                            <p className="text-sm font-semibold text-ink-900">
-                              Signatory {signatoryIndex + 1}:{" "}
-                              {signatory.position_name}
-                            </p>
-                            <p className="mt-1 text-sm text-muted-foreground">
-                              {signatory.description ||
-                                "Assign the reviewer who should approve this stage."}
-                            </p>
-                            <p className="mt-2 text-xs font-medium uppercase tracking-wide text-pup-maroon">
-                              {signatory.is_required ? "Required" : "Optional"}
-                            </p>
-                          </div>
-
-                          <div className="space-y-2">
-                            <Label>Select reviewer</Label>
-                            <Combobox
-                              items={reviewerItems}
-                              placeholder="Choose a PROGRAM_REVIEWER"
-                              searchPlaceholder="Search reviewer"
-                              value={
-                                signatorySelections[signatory.signatory_id] || ""
-                              }
-                              onValueChange={(value) =>
-                                updateSignatorySelection(
-                                  signatory.signatory_id,
-                                  value
-                                )
-                              }
-                            />
-                            {signatoryError ? (
-                              <p className="text-xs font-medium text-destructive">
-                                {signatoryError}
-                              </p>
-                            ) : null}
-                            {selectedReviewer ? (
-                              <p className="text-xs text-muted-foreground">
-                                {buildReviewerLabel(selectedReviewer)}
-                                {selectedReviewer.program
-                                  ? ` | ${selectedReviewer.program}`
-                                  : ""}
-                                {selectedReviewer.email
-                                  ? ` | ${selectedReviewer.email}`
-                                  : ""}
-                              </p>
-                            ) : null}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className="rounded-md border border-dashed bg-muted-100/20 px-4 py-4 text-sm text-muted-foreground">
-                    This form does not currently require signatories.
-                  </div>
-                )}
               </CardContent>
             </Card>
 
@@ -495,8 +316,8 @@ export default function FormsApplyPage() {
                       : "Signed-in user"}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    This step only starts the application and assigns its
-                    signatories.
+                    This step only starts the application. GSRO will assign the
+                    signatories and continue the review afterward.
                   </p>
                 </div>
               </div>

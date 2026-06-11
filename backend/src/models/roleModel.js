@@ -37,7 +37,28 @@ const findRolesByIds = async (roleIds) => {
   return result.rows;
 };
 
+const findRoleByCode = async (roleCode) => {
+  const result = await query(
+    `
+      SELECT
+        role_id,
+        role_code,
+        role_name,
+        description,
+        is_active
+      FROM roles
+      WHERE role_code = $1
+        AND is_active = TRUE
+      LIMIT 1
+    `,
+    [roleCode]
+  );
+
+  return result.rows[0] || null;
+};
+
 module.exports = {
   findActiveRoles,
+  findRoleByCode,
   findRolesByIds
 };

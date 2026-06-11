@@ -16,11 +16,13 @@ configurePassport(passport);
 const corsOptions = env.clientUrl
   ? {
       origin: env.clientUrl,
-      credentials: true
+      credentials: true,
+      exposedHeaders: ["Content-Disposition", "Content-Type"]
     }
   : {
       origin: true,
-      credentials: true
+      credentials: true,
+      exposedHeaders: ["Content-Disposition", "Content-Type"]
     };
 
 app.use(cors(corsOptions));

@@ -18,9 +18,14 @@ router.get(
   formApplicationController.getFormApplicationDetails
 );
 router.get(
+  "/:applicationId/report",
+  authenticate,
+  formApplicationController.downloadApplicationReport
+);
+router.get(
   "/:applicationId/certificate",
   authenticate,
-  formApplicationController.downloadApplicationCertificate
+  formApplicationController.downloadApplicationReport
 );
 router.put(
   "/:applicationId/answers",
@@ -31,6 +36,11 @@ router.put(
   "/:applicationId/signatories",
   authenticate,
   formApplicationController.updateApplicationSignatories
+);
+router.post(
+  "/:applicationId/withdraw",
+  authenticate,
+  formApplicationController.withdrawApplication
 );
 router.post(
   "/:applicationId/signatories/:applicationSignatoryId/approve",

@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
+import ModuleProtectedRoute from "@/components/common/ModuleProtectedRoute";
 import ProtectedRoute from "@/components/common/ProtectedRoute";
 import PublicOnlyRoute from "@/components/common/PublicOnlyRoute";
 import AppLayout from "@/layouts/AppLayout";
@@ -26,47 +27,59 @@ export default function App() {
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route element={<ProtectedRoute />}>
           <Route path="/dashboard" element={<DashboardPage />} />
-          <Route path="/applications" element={<ApplicationsPage />} />
-          <Route
-            path="/applications/for-signature"
-            element={<ApplicationsPage />}
-          />
-          <Route
-            path="/applications/for-signature/:applicationId"
-            element={<ApplicationDetailsPage />}
-          />
-          <Route path="/applications/my" element={<MyApplicationsPage />} />
-          <Route
-            path="/applications/my/:applicationId"
-            element={<ApplicationDetailsPage />}
-          />
-          <Route
-            path="/applications/:applicationId"
-            element={<ApplicationDetailsPage />}
-          />
-          <Route path="/forms/apply" element={<FormsApplyStartPage />} />
-          <Route path="/forms/apply/:formId" element={<FormsApplyPage />} />
-          <Route path="/forms/create" element={<FormsCreatePage />} />
-          <Route path="/forms/create/:formId" element={<FormsCreatePage />} />
-          <Route path="/forms/view" element={<FormsViewPage />} />
-          <Route
-            path="/users/add"
-            element={
-              <RegisterPage
-                eyebrow="Users"
-                title="Add user"
-                description="Create a user account and assign their basic profile details."
-                loadingTitle="Saving user"
-                loadingDescription="We are creating the user account."
-                requireEmailVerification={false}
-                submitLabel="Save User"
-                successMessage="User created successfully."
-              />
-            }
-          />
-          <Route path="/users/view" element={<UsersViewPage />} />
-          <Route path="/programs/create" element={<ProgramsCreatePage />} />
-          <Route path="/programs/view" element={<ProgramsViewPage />} />
+
+          <Route element={<ModuleProtectedRoute module="admin" />}>
+            <Route path="/forms/create" element={<FormsCreatePage />} />
+            <Route path="/forms/create/:formId" element={<FormsCreatePage />} />
+            <Route path="/forms/view" element={<FormsViewPage />} />
+            <Route
+              path="/users/add"
+              element={
+                <RegisterPage
+                  eyebrow="Users"
+                  title="Add user"
+                  description="Create a user account and assign their basic profile details."
+                  loadingTitle="Saving user"
+                  loadingDescription="We are creating the user account."
+                  requireEmailVerification={false}
+                  submitLabel="Save User"
+                  successMessage="User created successfully."
+                />
+              }
+            />
+            <Route path="/users/view" element={<UsersViewPage />} />
+            <Route path="/programs/create" element={<ProgramsCreatePage />} />
+            <Route path="/programs/view" element={<ProgramsViewPage />} />
+          </Route>
+
+          <Route element={<ModuleProtectedRoute module="gsro" />}>
+            <Route path="/applications" element={<ApplicationsPage />} />
+            <Route
+              path="/applications/:applicationId"
+              element={<ApplicationDetailsPage />}
+            />
+          </Route>
+
+          <Route element={<ModuleProtectedRoute module="reviewer" />}>
+            <Route
+              path="/applications/for-signature"
+              element={<ApplicationsPage />}
+            />
+            <Route
+              path="/applications/for-signature/:applicationId"
+              element={<ApplicationDetailsPage />}
+            />
+          </Route>
+
+          <Route element={<ModuleProtectedRoute module="applicant" />}>
+            <Route path="/applications/my" element={<MyApplicationsPage />} />
+            <Route
+              path="/applications/my/:applicationId"
+              element={<ApplicationDetailsPage />}
+            />
+            <Route path="/forms/apply" element={<FormsApplyStartPage />} />
+            <Route path="/forms/apply/:formId" element={<FormsApplyPage />} />
+          </Route>
         </Route>
         <Route element={<PublicOnlyRoute />}>
           <Route path="/login" element={<LoginPage />} />

@@ -116,7 +116,6 @@ export type ReviewerUserRecord = {
 
 export type FormApplicationTemplate = {
   form: ManagedFormDetails;
-  reviewers: ReviewerUserRecord[];
 };
 
 export type Role = {
@@ -322,7 +321,6 @@ export type CreateFormApplicationAnswerPayload = {
 export type CreateFormApplicationPayload = {
   googleDriveLink: string;
   researchTitle: string;
-  signatories: CreateFormApplicationSignatoryPayload[];
 };
 
 export type UpdateApplicationSignatoriesPayload = {
@@ -333,7 +331,13 @@ export type UpdateApplicationAnswersPayload = {
   answers: CreateFormApplicationAnswerPayload[];
 };
 
+export type SignatoryQuestionCommentPayload = {
+  commentText?: string;
+  questionId: string;
+};
+
 export type SignatoryDecisionPayload = {
+  questionComments?: SignatoryQuestionCommentPayload[];
   remarks?: string;
 };
 
@@ -399,6 +403,23 @@ export type ApplicationSignatoryRecord = {
   signer_name?: string | null;
 };
 
+export type ApplicationQuestionCommentRecord = {
+  application_question_comment_id: string;
+  application_id: string;
+  application_signatory_id: string;
+  commenter_user_id: string;
+  question_id: string;
+  comment_text: string;
+  created_at: string;
+  updated_at: string;
+  position_name_snapshot?: string | null;
+  commenter_firstname?: string | null;
+  commenter_middlename?: string | null;
+  commenter_lastname?: string | null;
+  commenter_email?: string | null;
+  commenter_name?: string | null;
+};
+
 export type FormApplicationSummary = {
   application_id: string;
   form_id: string;
@@ -439,6 +460,7 @@ export type FormApplicationQuestionSnapshot = {
   question_type: string;
   sort_order: number;
   answer: ApplicationAnswerRecord | null;
+  question_comments: ApplicationQuestionCommentRecord[];
 };
 
 export type FormApplicationSectionSnapshot = {
@@ -471,6 +493,7 @@ export type FormApplicationDetails = {
     can_edit_signatories: boolean;
     can_approve: boolean;
     can_answer: boolean;
+    can_withdraw: boolean;
     is_applicant: boolean;
   };
   form: {
@@ -561,6 +584,24 @@ const parseDownloadFilename = (contentDisposition: string | null) => {
   return fileNameMatch?.[1] || null;
 };
 
+const buildFallbackDownloadFilename = (contentType: string | null) => {
+  const normalizedContentType = (contentType || "").toLowerCase();
+
+  if (normalizedContentType.includes("wordprocessingml.document")) {
+    return "download.docx";
+  }
+
+  if (normalizedContentType.includes("pdf")) {
+    return "download.pdf";
+  }
+
+  if (normalizedContentType.includes("json")) {
+    return "download.json";
+  }
+
+  return "download";
+};
+
 async function apiRequest<TResponse, TError = unknown, TBody = unknown>(
   path: string,
   { body, method = "GET", query, token }: ApiRequestOptions<TBody> = {}
@@ -628,11 +669,15 @@ async function downloadFileRequest(path: string, token: string): Promise<Downloa
     throw error;
   }
 
+  const blob = await response.blob();
+  const contentDisposition = response.headers.get("Content-Disposition");
+  const contentType = response.headers.get("Content-Type") || blob.type;
+
   return {
-    blob: await response.blob(),
+    blob,
     filename:
-      parseDownloadFilename(response.headers.get("Content-Disposition")) ||
-      "download.pdf"
+      parseDownloadFilename(contentDisposition) ||
+      buildFallbackDownloadFilename(contentType)
   };
 }
 
@@ -733,11 +778,11 @@ export async function fetchMyApplications(token: string) {
   return apiRequest<FormApplicationsResponse>("/applications/my", { token });
 }
 
-export async function downloadApplicationCertificate(
+export async function downloadApplicationReport(
   token: string,
   applicationId: string
 ) {
-  return downloadFileRequest(`/applications/${applicationId}/certificate`, token);
+  return downloadFileRequest(`/applications/${applicationId}/report`, token);
 }
 
 export async function fetchApplicationDetails(
@@ -745,6 +790,13 @@ export async function fetchApplicationDetails(
   applicationId: string
 ) {
   return apiRequest<FormApplicationDetails>(`/applications/${applicationId}`, {
+    token
+  });
+}
+
+export async function withdrawApplication(token: string, applicationId: string) {
+  return apiRequest<FormApplicationResponse>(`/applications/${applicationId}/withdraw`, {
+    method: "POST",
     token
   });
 }

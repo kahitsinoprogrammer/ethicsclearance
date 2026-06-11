@@ -17,6 +17,13 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
+import {
+  getDefaultAuthenticatedRoute,
+  hasAdminModuleAccess,
+  hasApplicantModuleAccess,
+  hasGsroModuleAccess,
+  hasReviewerModuleAccess
+} from "@/lib/moduleAccess";
 import { cn } from "@/lib/utils";
 
 const authenticatedNavItems = [
@@ -46,23 +53,34 @@ export default function AppLayout() {
   const [openMenu, setOpenMenu] = useState<
     "applications" | "forms" | "programs" | "users" | null
   >(null);
-  const navItems = isAuthenticated ? authenticatedNavItems : guestNavItems;
-  const gsroRoleCodes = [
-    "GSREC_GSREO_OFFICER",
-    "GSRO_OFFICER",
-    "GSRO"
-  ];
-  const hasGsroAccess = gsroRoleCodes.some((roleCode) =>
-    user?.role_codes?.includes(roleCode)
-  );
-  const hasReviewerAccess = Boolean(
-    user?.role_codes?.includes("PROGRAM_REVIEWER")
-  );
+  const hasAdminAccess = hasAdminModuleAccess(user);
+  const hasApplicantAccess = hasApplicantModuleAccess(user);
+  const hasGsroAccess = hasGsroModuleAccess(user);
+  const hasReviewerAccess = hasReviewerModuleAccess(user);
+  const hasApplicationsAccess =
+    hasApplicantAccess || hasGsroAccess || hasReviewerAccess;
+  const hasApplicationItemsBeforeGsro =
+    hasApplicantAccess || hasReviewerAccess;
+  const navItems = isAuthenticated
+    ? authenticatedNavItems
+    : guestNavItems;
+  const homeRoute = isAuthenticated
+    ? getDefaultAuthenticatedRoute(user)
+    : "/login";
   const isApplicationsMenuOpen = openMenu === "applications";
   const isFormsMenuOpen = openMenu === "forms";
   const isUsersMenuOpen = openMenu === "users";
   const isProgramsMenuOpen = openMenu === "programs";
   const isStartApplicationRoute = location.pathname.startsWith("/forms/apply");
+  const isMyApplicationsRoute = location.pathname.startsWith("/applications/my");
+  const isForSignatureRoute = location.pathname.startsWith(
+    "/applications/for-signature"
+  );
+  const isGsroQueueRoute =
+    location.pathname === "/applications" ||
+    (/^\/applications\/[^/]+$/.test(location.pathname) &&
+      !isMyApplicationsRoute &&
+      !isForSignatureRoute);
   const isFormsRoute =
     location.pathname.startsWith("/forms") && !isStartApplicationRoute;
   const isApplicationsRoute =
@@ -103,9 +121,9 @@ export default function AppLayout() {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b bg-white/90 backdrop-blur">
+      <header className="relative z-40 border-b bg-white/90 backdrop-blur">
         <div className="mx-auto flex min-h-16 w-full max-w-7xl flex-col gap-4 px-4 py-4 sm:px-6 md:flex-row md:items-center md:justify-between lg:px-8">
-          <NavLink to="/dashboard" className="flex items-center gap-3">
+          <NavLink to={homeRoute} className="flex items-center gap-3">
             <span className="flex h-10 w-10 items-center justify-center rounded-md bg-pup-maroon text-pup-gold">
               <ClipboardCheck className="h-5 w-5" aria-hidden="true" />
             </span>
@@ -132,7 +150,7 @@ export default function AppLayout() {
                 {item.label}
               </Button>
             ))}
-            {isAuthenticated ? (
+            {isAuthenticated && hasApplicationsAccess ? (
               <div ref={applicationsMenuRef} className="relative">
                 <Button
                   type="button"
@@ -158,37 +176,46 @@ export default function AppLayout() {
 
                 {isApplicationsMenuOpen ? (
                   <div className="absolute right-0 z-30 mt-2 w-56 overflow-hidden rounded-md border bg-white shadow-lg">
-                    <NavLink
-                      to="/forms/apply"
-                      className={({ isActive }) =>
-                        cn(
-                          "flex items-center gap-2 border-b px-3 py-2 text-sm text-ink-900 hover:bg-muted-100",
-                          isActive && "bg-pup-maroon/10 text-pup-maroon"
-                        )
-                      }
-                    >
-                      <ClipboardCheck className="h-4 w-4" aria-hidden="true" />
-                      Start Application
-                    </NavLink>
-                    <NavLink
-                      to="/applications/my"
-                      className={({ isActive }) =>
-                        cn(
-                          "flex items-center gap-2 border-b px-3 py-2 text-sm text-ink-900 hover:bg-muted-100",
-                          isActive && "bg-pup-maroon/10 text-pup-maroon"
-                        )
-                      }
-                    >
-                      <FileText className="h-4 w-4" aria-hidden="true" />
-                      My Applications
-                    </NavLink>
+                    {hasApplicantAccess ? (
+                      <NavLink
+                        to="/forms/apply"
+                        className={() =>
+                          cn(
+                            "flex items-center gap-2 border-b px-3 py-2 text-sm text-ink-900 hover:bg-muted-100",
+                            isStartApplicationRoute &&
+                              "bg-pup-maroon/10 text-pup-maroon"
+                          )
+                        }
+                      >
+                        <ClipboardCheck className="h-4 w-4" aria-hidden="true" />
+                        Start Application
+                      </NavLink>
+                    ) : null}
+                    {hasApplicantAccess ? (
+                      <NavLink
+                        to="/applications/my"
+                        className={() =>
+                          cn(
+                            "flex items-center gap-2 px-3 py-2 text-sm text-ink-900 hover:bg-muted-100",
+                            (hasReviewerAccess || hasGsroAccess) && "border-b",
+                            isMyApplicationsRoute &&
+                              "bg-pup-maroon/10 text-pup-maroon"
+                          )
+                        }
+                      >
+                        <FileText className="h-4 w-4" aria-hidden="true" />
+                        My Applications
+                      </NavLink>
+                    ) : null}
                     {hasReviewerAccess ? (
                       <NavLink
                         to="/applications/for-signature"
-                        className={({ isActive }) =>
+                        className={() =>
                           cn(
                             "flex items-center gap-2 px-3 py-2 text-sm text-ink-900 hover:bg-muted-100",
-                            isActive && "bg-pup-maroon/10 text-pup-maroon"
+                            hasGsroAccess && "border-b",
+                            isForSignatureRoute &&
+                              "bg-pup-maroon/10 text-pup-maroon"
                           )
                         }
                       >
@@ -199,10 +226,12 @@ export default function AppLayout() {
                     {hasGsroAccess ? (
                       <NavLink
                         to="/applications"
-                        className={({ isActive }) =>
+                        className={() =>
                           cn(
-                            "flex items-center gap-2 border-t px-3 py-2 text-sm text-ink-900 hover:bg-muted-100",
-                            isActive && "bg-pup-maroon/10 text-pup-maroon"
+                            "flex items-center gap-2 px-3 py-2 text-sm text-ink-900 hover:bg-muted-100",
+                            hasApplicationItemsBeforeGsro && "border-t",
+                            isGsroQueueRoute &&
+                              "bg-pup-maroon/10 text-pup-maroon"
                           )
                         }
                       >
@@ -214,7 +243,7 @@ export default function AppLayout() {
                 ) : null}
               </div>
             ) : null}
-            {isAuthenticated ? (
+            {isAuthenticated && hasAdminAccess ? (
               <div ref={programsMenuRef} className="relative">
                 <Button
                   type="button"
@@ -268,7 +297,7 @@ export default function AppLayout() {
                 ) : null}
               </div>
             ) : null}
-            {isAuthenticated ? (
+            {isAuthenticated && hasAdminAccess ? (
               <div ref={formsMenuRef} className="relative">
                 <Button
                   type="button"
@@ -320,7 +349,7 @@ export default function AppLayout() {
                 ) : null}
               </div>
             ) : null}
-            {isAuthenticated ? (
+            {isAuthenticated && hasAdminAccess ? (
               <div ref={usersMenuRef} className="relative">
                 <Button
                   type="button"

@@ -9,6 +9,26 @@ const ensureApplicationSchemaCompatibility = async () => {
     ALTER TABLE IF EXISTS form_applications
     ADD COLUMN IF NOT EXISTS google_drive_link text
   `);
+
+  await query(`
+    ALTER TABLE IF EXISTS form_applications
+    DROP CONSTRAINT IF EXISTS chk_form_applications_status
+  `);
+
+  await query(`
+    ALTER TABLE IF EXISTS form_applications
+    ADD CONSTRAINT chk_form_applications_status CHECK (
+      application_status IN (
+        'draft',
+        'submitted',
+        'under_review',
+        'approved',
+        'rejected',
+        'cancelled',
+        'withdrawn'
+      )
+    )
+  `);
 };
 
 const initializeDatabase = async () => {

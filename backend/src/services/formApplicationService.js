@@ -2,17 +2,29 @@ const { getPool } = require("../config/database");
 const formApplicationModel = require("../models/formApplicationModel");
 const formModel = require("../models/formModel");
 const userModel = require("../models/userModel");
-const { createPdfCertificate } = require("../utils/pdfCertificate");
+const {
+  createApplicationReportDocx,
+  REPORT_TEMPLATE_FILE_NAME
+} = require("../utils/applicationReportDocx");
 const { buildApiResponse } = require("../utils/response");
 const { getCurrentTimestamp } = require("../utils/time");
+
+const ADMIN_ROLE_CODES = [
+  "ADMIN",
+  "SUPER_ADMIN",
+  "SUPERADMIN",
+  "SYSTEM_ADMIN",
+  "SYSTEM_ADMINISTRATOR",
+  "ADMINISTRATOR"
+];
 
 const GSRO_ROLE_CODES = [
   "GSREC_GSREO_OFFICER",
   "GSRO_OFFICER",
   "GSRO"
 ];
+const APPLICATION_MANAGER_ROLE_CODES = [...ADMIN_ROLE_CODES, ...GSRO_ROLE_CODES];
 const APPLICANT_SCOPE_CODE = "APPLICANT";
-const DEFAULT_CERTIFICATE_TEXT = "Not provided";
 const GSRO_SCOPE_CODE = "GSRO";
 const PROGRAM_REVIEWER_ROLE_CODE = "PROGRAM_REVIEWER";
 const questionTypesWithOptions = new Set(["RADIO", "CHECKBOX", "SELECT"]);
@@ -127,14 +139,13 @@ const buildSelectedOptionSnapshot = (option) => ({
 });
 
 const isTerminalApplicationStatus = (applicationStatus) => {
-  return ["approved", "cancelled", "rejected"].includes(applicationStatus);
+  return ["approved", "cancelled", "rejected", "withdrawn"].includes(
+    applicationStatus
+  );
 };
 
-const canApplicantEditSignatories = (application, signatories, userId) => {
-  const applicantId =
-    application?.applicant_id || application?.applicant?.applicant_id || null;
-
-  if (!application || !userId || applicantId !== userId) {
+const canGsroEditSignatories = (application, signatories, user) => {
+  if (!application || !hasAnyRoleCode(user, APPLICATION_MANAGER_ROLE_CODES)) {
     return false;
   }
 
@@ -143,7 +154,7 @@ const canApplicantEditSignatories = (application, signatories, userId) => {
   }
 
   return signatories.every((signatory) =>
-    ["pending", "skipped"].includes(signatory.signatory_status)
+    ["pending", "rejected", "skipped"].includes(signatory.signatory_status)
   );
 };
 
@@ -322,6 +333,16 @@ const validateReviewerSelections = (form, reviewers, rawSignatories) => {
       signatoryStatus: signerUserId ? "pending" : "skipped"
     };
   });
+};
+
+const buildInitialApplicationSignatories = (form) => {
+  return form.signatories.map((signatory) => ({
+    isRequired: signatory.is_required,
+    positionNameSnapshot: signatory.position_name,
+    signerUserId: null,
+    signatoryId: signatory.signatory_id,
+    signatoryStatus: "pending"
+  }));
 };
 
 const buildQuestionMapFromSnapshot = (application) => {
@@ -528,6 +549,10 @@ const buildApplicationDetails = async (applicationId, dbClient) => {
     applicationId,
     dbClient
   );
+  const questionComments = await formApplicationModel.findApplicationQuestionComments(
+    applicationId,
+    dbClient
+  );
 
   const optionsByAnswerId = answerOptions.reduce((accumulator, option) => {
     if (!accumulator[option.application_answer_id]) {
@@ -547,6 +572,18 @@ const buildApplicationDetails = async (applicationId, dbClient) => {
 
     return accumulator;
   }, {});
+  const questionCommentsByQuestionId = questionComments.reduce(
+    (accumulator, questionComment) => {
+      if (!accumulator[questionComment.question_id]) {
+        accumulator[questionComment.question_id] = [];
+      }
+
+      accumulator[questionComment.question_id].push(questionComment);
+
+      return accumulator;
+    },
+    {}
+  );
 
   const snapshot = application.form_snapshot || {};
   const sections = Array.isArray(snapshot.sections) ? snapshot.sections : [];
@@ -580,7 +617,8 @@ const buildApplicationDetails = async (applicationId, dbClient) => {
         questions: (Array.isArray(section.questions) ? section.questions : []).map(
           (question) => ({
             ...question,
-            answer: answersByQuestionId[question.question_id] || null
+            answer: answersByQuestionId[question.question_id] || null,
+            question_comments: questionCommentsByQuestionId[question.question_id] || []
           })
         )
       }))
@@ -596,45 +634,6 @@ const buildApplicationDetails = async (applicationId, dbClient) => {
   };
 };
 
-const buildCertificateFileName = (details) => {
-  const rawSegment = normalizeString(details.reference_no || details.application_id)
-    .replace(/[^A-Za-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .toLowerCase();
-
-  return rawSegment
-    ? `ethics-certificate-${rawSegment}.pdf`
-    : "ethics-certificate.pdf";
-};
-
-const buildCertificatePayload = (details) => {
-  const signedDates = details.signatories
-    .map((signatory) => signatory.signed_at)
-    .filter(Boolean)
-    .map((value) => new Date(value))
-    .filter((value) => !Number.isNaN(value.getTime()))
-    .sort((left, right) => right.getTime() - left.getTime());
-
-  return {
-    applicantEmail: details.applicant.email || DEFAULT_CERTIFICATE_TEXT,
-    applicantName: details.applicant.name || DEFAULT_CERTIFICATE_TEXT,
-    approvedAt: signedDates.length ? signedDates[0].toISOString() : details.updated_at,
-    formName:
-      details.form?.form_name || details.form_name_snapshot || DEFAULT_CERTIFICATE_TEXT,
-    generatedAt: getCurrentTimestamp(),
-    referenceNo: details.reference_no || details.application_id,
-    researchTitle: details.research_title || DEFAULT_CERTIFICATE_TEXT,
-    signatories: details.signatories.map((signatory) => ({
-      position_name_snapshot:
-        signatory.position_name_snapshot || DEFAULT_CERTIFICATE_TEXT,
-      signed_at: signatory.signed_at,
-      signer_name: signatory.signer_name || null,
-      signatory_status: signatory.signatory_status || "pending"
-    })),
-    submittedAt: details.submitted_at || details.created_at
-  };
-};
-
 const getFormApplicationTemplate = async (formId) => {
   const normalizedFormId = normalizeString(formId);
 
@@ -642,18 +641,14 @@ const getFormApplicationTemplate = async (formId) => {
     throw createValidationError("Form ID is required.");
   }
 
-  const [form, reviewers] = await Promise.all([
-    buildActiveFormDetails(normalizedFormId),
-    getProgramReviewers()
-  ]);
+  const form = await buildActiveFormDetails(normalizedFormId);
 
   if (!form) {
     throw createNotFoundError("Active form not found.");
   }
 
   return buildApiResponse({
-    form,
-    reviewers
+    form
   });
 };
 
@@ -677,16 +672,12 @@ const createFormApplication = async (formId, payload, user) => {
       throw createNotFoundError("Active form not found.");
     }
 
-    const reviewers = await getProgramReviewers();
-    const rawSignatories = Array.isArray(payload?.signatories)
-      ? payload.signatories
-      : [];
     const googleDriveLink = normalizeGoogleDriveLink(payload?.googleDriveLink);
     const researchTitle = normalizeRequiredText(
       payload?.researchTitle,
       "Research Title is required."
     );
-    const signatories = validateReviewerSelections(form, reviewers, rawSignatories);
+    const signatories = buildInitialApplicationSignatories(form);
     const submittedAt = getCurrentTimestamp();
     const createdApplication = await formApplicationModel.createFormApplication(
       {
@@ -752,7 +743,7 @@ const listFormApplications = async (user) => {
 
   let roleCode = null;
 
-  if (hasAnyRoleCode(user, GSRO_ROLE_CODES)) {
+  if (hasAnyRoleCode(user, APPLICATION_MANAGER_ROLE_CODES)) {
     roleCode = GSRO_SCOPE_CODE;
   } else if (hasRoleCode(user, PROGRAM_REVIEWER_ROLE_CODE)) {
     roleCode = PROGRAM_REVIEWER_ROLE_CODE;
@@ -789,10 +780,10 @@ const listMyFormApplications = async (user) => {
 const listApplicationsForSignature = async (user) => {
   const userId = ensureUserId(user);
 
-  ensureRole(
+  ensureAnyRole(
     user,
-    PROGRAM_REVIEWER_ROLE_CODE,
-    "Only assigned signatories can access applications for signature."
+    [...ADMIN_ROLE_CODES, PROGRAM_REVIEWER_ROLE_CODE],
+    "Only assigned signatories and admins can access applications for signature."
   );
 
   const applications = await formApplicationModel.findApplicationsForUser({
@@ -824,20 +815,28 @@ const getFormApplicationDetails = async (applicationId, user) => {
     (signatory) => signatory.signer_user_id === userId
   );
   const assignedPendingSignatory = assignedSignatories.find(
-    (signatory) => signatory.signatory_status === "pending"
+    (signatory) =>
+      signatory.signatory_status === "pending" &&
+      details.application_status === "under_review"
+  );
+  const assignedRevisionRequestedSignatory = assignedSignatories.find(
+    (signatory) =>
+      signatory.signatory_status === "rejected" &&
+      ["submitted", "under_review"].includes(details.application_status)
   );
   const isApplicant = details.applicant.applicant_id === userId;
-  const canAnswer = hasAnyRoleCode(user, GSRO_ROLE_CODES);
+  const canAnswer = hasAnyRoleCode(user, APPLICATION_MANAGER_ROLE_CODES);
   const canApprove =
     hasRoleCode(user, PROGRAM_REVIEWER_ROLE_CODE) &&
-    Boolean(assignedPendingSignatory) &&
-    details.application_status === "under_review" &&
-    assignedPendingSignatory.signatory_status === "pending";
-  const canEditSignatories = canApplicantEditSignatories(
+    (Boolean(assignedPendingSignatory) ||
+      Boolean(assignedRevisionRequestedSignatory));
+  const canEditSignatories = canGsroEditSignatories(
     details,
     details.signatories,
-    userId
+    user
   );
+  const canWithdraw =
+    isApplicant && !isTerminalApplicationStatus(details.application_status);
 
   if (!canAnswer && assignedSignatories.length === 0 && !isApplicant) {
     throw createForbiddenError("You do not have access to this application.");
@@ -851,6 +850,7 @@ const getFormApplicationDetails = async (applicationId, user) => {
       can_edit_signatories: canEditSignatories,
       can_approve: canApprove,
       can_answer: canAnswer,
+      can_withdraw: canWithdraw,
       is_applicant: isApplicant
     },
     reviewers
@@ -885,11 +885,71 @@ const validateGsroAnswersPayload = (application, payload) => {
   );
 };
 
+const validateSignatoryQuestionComments = (
+  application,
+  payload,
+  decision
+) => {
+  const questionMap = buildQuestionMapFromSnapshot(application);
+  const rawQuestionComments = Array.isArray(payload?.questionComments)
+    ? payload.questionComments
+    : [];
+  const submittedQuestionIds = new Set();
+  const questionComments = [];
+
+  for (const rawQuestionComment of rawQuestionComments) {
+    const questionId = normalizeString(rawQuestionComment?.questionId);
+
+    if (!questionId) {
+      throw createValidationError(
+        "Each signatory question comment must include a question ID."
+      );
+    }
+
+    if (!questionMap.has(questionId)) {
+      throw createValidationError("One or more signatory question comments are invalid.");
+    }
+
+    if (submittedQuestionIds.has(questionId)) {
+      throw createValidationError(
+        "Duplicate signatory question comments are not allowed."
+      );
+    }
+
+    submittedQuestionIds.add(questionId);
+
+    const commentText = normalizeNullableText(rawQuestionComment?.commentText);
+
+    if (!commentText) {
+      continue;
+    }
+
+    questionComments.push({
+      commentText,
+      questionId
+    });
+  }
+
+  if (decision === "approve" && questionComments.length > 0) {
+    throw createValidationError(
+      "Question comments can only be submitted when requesting revision."
+    );
+  }
+
+  if (decision === "reject" && questionComments.length === 0) {
+    throw createValidationError(
+      "Add at least one question comment before requesting revision for this application."
+    );
+  }
+
+  return questionComments;
+};
+
 const updateApplicationAnswers = async (applicationId, payload, user) => {
   ensureAnyRole(
     user,
-    GSRO_ROLE_CODES,
-    "Only GSRO users can complete the application answers."
+    APPLICATION_MANAGER_ROLE_CODES,
+    "Only GSRO users and admins can complete the application answers."
   );
   const normalizedApplicationId = normalizeString(applicationId);
 
@@ -912,12 +972,10 @@ const updateApplicationAnswers = async (applicationId, payload, user) => {
       throw createNotFoundError("Application not found.");
     }
 
-    if (application.application_status === "approved") {
-      throw createValidationError("Completed applications can no longer be edited.");
-    }
-
-    if (application.application_status === "rejected") {
-      throw createValidationError("Rejected applications can no longer be edited.");
+    if (isTerminalApplicationStatus(application.application_status)) {
+      throw createValidationError(
+        "Completed, rejected, or withdrawn applications can no longer be edited."
+      );
     }
 
     const answers = validateGsroAnswersPayload(application, payload);
@@ -958,6 +1016,11 @@ const updateApplicationAnswers = async (applicationId, payload, user) => {
       }
     }
 
+    await formApplicationModel.resetApplicationSignatoriesForReview(
+      normalizedApplicationId,
+      client
+    );
+
     const updatedApplication = await formApplicationModel.updateApplicationStatus(
       {
         applicationId: normalizedApplicationId,
@@ -985,12 +1048,17 @@ const updateApplicationAnswers = async (applicationId, payload, user) => {
 };
 
 const updateApplicationSignatories = async (applicationId, payload, user) => {
-  const userId = ensureUserId(user);
   const normalizedApplicationId = normalizeString(applicationId);
 
   if (!normalizedApplicationId) {
     throw createValidationError("Application ID is required.");
   }
+
+  ensureAnyRole(
+    user,
+    APPLICATION_MANAGER_ROLE_CODES,
+    "Only GSRO users and admins can manage application signatories."
+  );
 
   const pool = getPool();
   const client = await pool.connect();
@@ -1012,11 +1080,9 @@ const updateApplicationSignatories = async (applicationId, payload, user) => {
       client
     );
 
-    if (
-      !canApplicantEditSignatories(application, existingSignatories, userId)
-    ) {
+    if (!canGsroEditSignatories(application, existingSignatories, user)) {
       throw createValidationError(
-        "Signatories can only be edited while the application is still pending."
+        "Signatories can only be updated before any approval decision is recorded."
       );
     }
 
@@ -1030,6 +1096,10 @@ const updateApplicationSignatories = async (applicationId, payload, user) => {
       Array.isArray(payload?.signatories) ? payload.signatories : []
     );
 
+    await formApplicationModel.deleteApplicationQuestionComments(
+      normalizedApplicationId,
+      client
+    );
     await formApplicationModel.deleteApplicationSignatories(
       normalizedApplicationId,
       client
@@ -1111,12 +1181,6 @@ const updateSignatoryDecision = async (
       throw createNotFoundError("Application not found.");
     }
 
-    if (application.application_status !== "under_review") {
-      throw createValidationError(
-        "Signatory decisions are allowed only after GSRO has completed the answers."
-      );
-    }
-
     const signatories = await formApplicationModel.findApplicationSignatories(
       normalizedApplicationId,
       client
@@ -1136,15 +1200,50 @@ const updateSignatoryDecision = async (
       );
     }
 
-    if (targetSignatory.signatory_status !== "pending") {
-      throw createValidationError("This signatory step has already been decided.");
+    const canRecordDecision =
+      application.application_status === "under_review" ||
+      (application.application_status === "submitted" &&
+        targetSignatory.signatory_status === "rejected");
+
+    if (!canRecordDecision) {
+      throw createValidationError(
+        "Signatory decisions are allowed only after GSRO has completed the answers or when your revision request is still active."
+      );
+    }
+
+    if (!["pending", "rejected"].includes(targetSignatory.signatory_status)) {
+      throw createValidationError("This signatory step can no longer be updated.");
+    }
+
+    const questionComments = validateSignatoryQuestionComments(
+      application,
+      payload,
+      decision
+    );
+
+    await formApplicationModel.deleteApplicationQuestionCommentsBySignatory(
+      normalizedApplicationSignatoryId,
+      client
+    );
+
+    for (const questionComment of questionComments) {
+      await formApplicationModel.createApplicationQuestionComment(
+        {
+          applicationId: normalizedApplicationId,
+          applicationSignatoryId: normalizedApplicationSignatoryId,
+          commenterUserId: user.user_id,
+          commentText: questionComment.commentText,
+          questionId: questionComment.questionId
+        },
+        client
+      );
     }
 
     await formApplicationModel.updateApplicationSignatoryStatus(
       {
         applicationSignatoryId: normalizedApplicationSignatoryId,
         remarks: normalizeNullableText(payload?.remarks),
-        signedAt: getCurrentTimestamp(),
+        signedAt: decision === "approve" ? getCurrentTimestamp() : null,
         signatoryStatus: decision === "approve" ? "signed" : "rejected"
       },
       client
@@ -1163,7 +1262,7 @@ const updateSignatoryDecision = async (
       .every((signatory) => signatory.signatory_status === "signed");
 
     const nextStatus = hasRejectedRequiredSignatory
-      ? "rejected"
+      ? "submitted"
       : allRequiredSignatoriesApproved
         ? "approved"
         : "under_review";
@@ -1186,7 +1285,7 @@ const updateSignatoryDecision = async (
         ? nextStatus === "approved"
           ? "Signatory approval recorded. The application is now complete."
           : "Signatory approval recorded successfully."
-        : "Signatory rejection recorded successfully."
+        : "Revision request recorded successfully. GSRO can update the answers and send the application back for signatory review."
     );
   } catch (error) {
     await client.query("ROLLBACK");
@@ -1226,7 +1325,75 @@ const rejectApplicationSignatory = (
   );
 };
 
-const downloadApplicationCertificate = async (applicationId, user) => {
+const withdrawApplication = async (applicationId, user) => {
+  const normalizedApplicationId = normalizeString(applicationId);
+  const userId = ensureUserId(user);
+
+  if (!normalizedApplicationId) {
+    throw createValidationError("Application ID is required.");
+  }
+
+  const pool = getPool();
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const application = await formApplicationModel.findApplicationById(
+      normalizedApplicationId,
+      client
+    );
+
+    if (!application) {
+      throw createNotFoundError("Application not found.");
+    }
+
+    if (application.applicant_id !== userId) {
+      throw createForbiddenError("Only the applicant can withdraw this application.");
+    }
+
+    if (application.application_status === "withdrawn") {
+      throw createValidationError("This application has already been withdrawn.");
+    }
+
+    if (application.application_status === "approved") {
+      throw createValidationError("Completed applications can no longer be withdrawn.");
+    }
+
+    if (application.application_status === "rejected") {
+      throw createValidationError("Rejected applications can no longer be withdrawn.");
+    }
+
+    if (isTerminalApplicationStatus(application.application_status)) {
+      throw createValidationError("This application can no longer be withdrawn.");
+    }
+
+    const updatedApplication = await formApplicationModel.updateApplicationStatus(
+      {
+        applicationId: normalizedApplicationId,
+        applicationStatus: "withdrawn"
+      },
+      client
+    );
+
+    await client.query("COMMIT");
+
+    return buildApiResponse(
+      {
+        application_id: updatedApplication.application_id,
+        application_status: updatedApplication.application_status
+      },
+      "Application withdrawn successfully."
+    );
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+const downloadApplicationReport = async (applicationId, user) => {
   const normalizedApplicationId = normalizeString(applicationId);
   const userId = ensureUserId(user);
 
@@ -1241,37 +1408,39 @@ const downloadApplicationCertificate = async (applicationId, user) => {
   }
 
   const isApplicant = details.applicant.applicant_id === userId;
-  const canAccess = isApplicant || hasAnyRoleCode(user, GSRO_ROLE_CODES);
+  const canAccess =
+    isApplicant || hasAnyRoleCode(user, APPLICATION_MANAGER_ROLE_CODES);
 
   if (!canAccess) {
     throw createForbiddenError(
-      "Only the applicant and GSRO users can download the certificate."
+      "Only the applicant, GSRO users, and admins can download the report."
     );
   }
 
   if (details.application_status !== "approved") {
     throw createValidationError(
-      "Certificates are available only for completed applications."
+      "Reports are available only for completed applications."
     );
   }
 
   return {
-    buffer: createPdfCertificate(buildCertificatePayload(details)),
-    fileName: buildCertificateFileName(details),
-    mimeType: "application/pdf"
+    buffer: await createApplicationReportDocx(details.research_title),
+    fileName: REPORT_TEMPLATE_FILE_NAME,
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
   };
 };
 
 module.exports = {
   approveApplicationSignatory,
   createFormApplication,
-  downloadApplicationCertificate,
+  downloadApplicationReport,
   getFormApplicationDetails,
   getFormApplicationTemplate,
   listApplicationsForSignature,
   listMyFormApplications,
   listFormApplications,
   rejectApplicationSignatory,
+  withdrawApplication,
   updateApplicationSignatories,
   updateApplicationAnswers
 };

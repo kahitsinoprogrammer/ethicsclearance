@@ -261,6 +261,55 @@ const createApplicationSignatory = async (
   return result.rows[0] || null;
 };
 
+const createApplicationQuestionComment = async (
+  {
+    applicationId,
+    applicationSignatoryId,
+    commenterUserId,
+    commentText,
+    questionId
+  },
+  dbClient
+) => {
+  const { createdAt, updatedAt } = getCreateAndUpdateTimestamps();
+
+  const result = await executeQuery(
+    dbClient,
+    `
+      INSERT INTO form_application_question_comments (
+        application_id,
+        application_signatory_id,
+        commenter_user_id,
+        question_id,
+        comment_text,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING
+        application_question_comment_id,
+        application_id,
+        application_signatory_id,
+        commenter_user_id,
+        question_id,
+        comment_text,
+        created_at,
+        updated_at
+    `,
+    [
+      applicationId,
+      applicationSignatoryId,
+      commenterUserId,
+      questionId,
+      commentText,
+      createdAt,
+      updatedAt
+    ]
+  );
+
+  return result.rows[0] || null;
+};
+
 const deleteApplicationSignatories = async (applicationId, dbClient) => {
   await executeQuery(
     dbClient,
@@ -269,6 +318,31 @@ const deleteApplicationSignatories = async (applicationId, dbClient) => {
       WHERE application_id = $1
     `,
     [applicationId]
+  );
+};
+
+const deleteApplicationQuestionComments = async (applicationId, dbClient) => {
+  await executeQuery(
+    dbClient,
+    `
+      DELETE FROM form_application_question_comments
+      WHERE application_id = $1
+    `,
+    [applicationId]
+  );
+};
+
+const deleteApplicationQuestionCommentsBySignatory = async (
+  applicationSignatoryId,
+  dbClient
+) => {
+  await executeQuery(
+    dbClient,
+    `
+      DELETE FROM form_application_question_comments
+      WHERE application_signatory_id = $1
+    `,
+    [applicationSignatoryId]
   );
 };
 
@@ -413,6 +487,49 @@ const findApplicationAnswerOptions = async (applicationId, dbClient) => {
   return result.rows;
 };
 
+const findApplicationQuestionComments = async (applicationId, dbClient) => {
+  const result = await executeQuery(
+    dbClient,
+    `
+      SELECT
+        faqc.application_question_comment_id,
+        faqc.application_id,
+        faqc.application_signatory_id,
+        faqc.commenter_user_id,
+        faqc.question_id,
+        faqc.comment_text,
+        faqc.created_at,
+        faqc.updated_at,
+        fas.position_name_snapshot,
+        commenter.firstname AS commenter_firstname,
+        commenter.middlename AS commenter_middlename,
+        commenter.lastname AS commenter_lastname,
+        commenter.email AS commenter_email,
+        NULLIF(
+          TRIM(
+            CONCAT_WS(
+              ' ',
+              commenter.firstname,
+              commenter.middlename,
+              commenter.lastname
+            )
+          ),
+          ''
+        ) AS commenter_name
+      FROM form_application_question_comments faqc
+      LEFT JOIN form_application_signatories fas
+        ON fas.application_signatory_id = faqc.application_signatory_id
+      LEFT JOIN users commenter
+        ON commenter.user_id = faqc.commenter_user_id
+      WHERE faqc.application_id = $1
+      ORDER BY faqc.created_at ASC, faqc.application_question_comment_id ASC
+    `,
+    [applicationId]
+  );
+
+  return result.rows;
+};
+
 const findApplicationSignatories = async (applicationId, dbClient) => {
   const result = await executeQuery(
     dbClient,
@@ -496,6 +613,35 @@ const updateApplicationSignatoryStatus = async (
   return result.rows[0] || null;
 };
 
+const resetApplicationSignatoriesForReview = async (applicationId, dbClient) => {
+  const updatedAt = getCurrentTimestamp();
+
+  await executeQuery(
+    dbClient,
+    `
+      UPDATE form_application_signatories
+      SET
+        signatory_status = CASE
+          WHEN signatory_status = 'rejected' AND signer_user_id IS NULL THEN 'skipped'
+          WHEN signatory_status = 'rejected' THEN 'pending'
+          ELSE signatory_status
+        END,
+        remarks = CASE
+          WHEN signatory_status = 'rejected' THEN NULL
+          ELSE remarks
+        END,
+        signed_at = CASE
+          WHEN signatory_status = 'rejected' THEN NULL
+          ELSE signed_at
+        END,
+        updated_at = $2
+      WHERE application_id = $1
+        AND signatory_status = 'rejected'
+    `,
+    [applicationId, updatedAt]
+  );
+};
+
 const findApplicationsForUser = async ({ roleCode, userId }, dbClient) => {
   const reviewerSelectClause =
     roleCode === "PROGRAM_REVIEWER"
@@ -503,6 +649,7 @@ const findApplicationsForUser = async ({ roleCode, userId }, dbClient) => {
         NULL::uuid AS current_user_application_signatory_id,
         CASE
           WHEN reviewer_assignments.current_user_pending_signatory_count > 0 THEN 'pending'
+          WHEN reviewer_assignments.current_user_rejected_signatory_count > 0 THEN 'rejected'
           WHEN reviewer_assignments.current_user_signed_signatory_count > 0 THEN 'signed'
           ELSE NULL
         END AS current_user_signatory_status,
@@ -522,6 +669,7 @@ const findApplicationsForUser = async ({ roleCode, userId }, dbClient) => {
           SELECT
             application_id,
             COUNT(*) FILTER (WHERE signatory_status = 'pending')::int AS current_user_pending_signatory_count,
+            COUNT(*) FILTER (WHERE signatory_status = 'rejected')::int AS current_user_rejected_signatory_count,
             COUNT(*) FILTER (WHERE signatory_status = 'signed')::int AS current_user_signed_signatory_count
           FROM form_application_signatories
           WHERE signer_user_id = $1
@@ -611,15 +759,20 @@ const findApplicationsForUser = async ({ roleCode, userId }, dbClient) => {
 module.exports = {
   createApplicationAnswer,
   createApplicationAnswerOption,
+  createApplicationQuestionComment,
   createApplicationSignatory,
   createFormApplication,
+  deleteApplicationQuestionComments,
+  deleteApplicationQuestionCommentsBySignatory,
   deleteApplicationSignatories,
   deleteApplicationAnswers,
   findApplicationAnswerOptions,
   findApplicationAnswers,
   findApplicationById,
+  findApplicationQuestionComments,
   findApplicationSignatories,
   findApplicationsForUser,
+  resetApplicationSignatoriesForReview,
   updateApplicationSignatoryStatus,
   updateApplicationStatus
 };

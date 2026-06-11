@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS form_applications (
       'under_review',
       'approved',
       'rejected',
-      'cancelled'
+      'cancelled',
+      'withdrawn'
     )
   )
 );

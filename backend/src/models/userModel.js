@@ -41,10 +41,12 @@ const createUser = async ({
   studentNo,
   userType,
   username
-}) => {
+},
+dbClient) => {
   const { createdAt, updatedAt } = getCreateAndUpdateTimestamps();
 
-  const result = await query(
+  const result = await executeQuery(
+    dbClient,
     `
       INSERT INTO users (
         firstname,
